@@ -368,13 +368,13 @@ class _MapScreenState extends ConsumerState<MapScreen> {
               ColorFiltered(
                 colorFilter: isDarkMode
                     ? const ColorFilter.matrix(<double>[
-                        // R' : elnyomja a vizek és növényzet vörösét, megőrzi a semleges utakat/épületeket
-                        0.8167, -0.9833, -0.3833, 0.0, 168.0,
-                        // G' : természetes zöld füvek/parkok, kizárja a lilás/bíbor elszíneződést
-                        -0.5833, 0.6167, -0.5833, 0.0, 168.0,
-                        // B' : tiszta kékes folyók/vizek (Duna), elnyomja a növényzet kékjét
-                        -0.7833, -0.5833, 0.8167, 0.0, 168.0,
-                        // A' : alfa változatlan
+                        // R' : Táj #5a5858 (90), Víz #616e74 (97), Park #698577 (105), Utak #474747 (71)
+                        -0.0974, -0.1457, -0.3575, 0.0, 223.6,
+                        // G' : Diszkrét szürkészöld növényzet/parkok (#698577), lila elnyomása
+                        -0.5140, 0.5102, -0.6455, 0.0, 233.8,
+                        // B' : Kékes-palaszürke vizek (#616e74), világos feliratok (#e0e9f2)
+                        -0.5194, 0.2168, -0.3797, 0.0, 243.0,
+                        // A' : Alfa változatlan
                         0.0, 0.0, 0.0, 1.0, 0.0,
                       ])
                     : const ColorFilter.mode(
