@@ -559,6 +559,84 @@ def build_spatial_index_and_hubs(conn: sqlite3.Connection) -> None:
     print(f"[Hubs] Created {len(hubs_to_insert):,} station hubs across {len(all_stops):,} stops.")
 
 
+def build_stop_platform_details(conn: sqlite3.Connection) -> None:
+    """Precomputes vehicle types, served lines, and directional headsigns per individual stop platform."""
+    cur = conn.cursor()
+    print("[Platforms] Computing served lines and headsigns for individual stop platforms...")
+    cur.execute(
+        """
+        SELECT
+            st.stop_id,
+            r.route_type,
+            r.short_name,
+            t.trip_headsign
+        FROM stop_times st
+        JOIN trips t ON t.id = st.trip_id
+        JOIN routes r ON r.id = t.route_id
+        GROUP BY st.stop_id, r.route_type, r.short_name, t.trip_headsign
+        """
+    )
+    rows = cur.fetchall()
+
+    def map_route_type(rt: int, short_name: str) -> str:
+        if rt == 0:
+            return "tram"
+        if rt == 1:
+            return "metro"
+        if rt == 2:
+            return "train"
+        if rt in (11, 800) or (
+            rt == 3
+            and short_name
+            and short_name.isdigit()
+            and int(short_name) in [70, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83]
+        ):
+            return "trolley"
+        if rt == 109:
+            return "suburban_rail"
+        if rt == 4:
+            return "boat"
+        return "bus"
+
+    by_stop: Dict[str, Dict[str, Set[str]]] = {}
+    for stop_id, rt, short_name, headsign in rows:
+        if stop_id not in by_stop:
+            by_stop[stop_id] = {"types": set(), "routes": set(), "headsigns": set()}
+        vtype = map_route_type(rt, short_name or "")
+        by_stop[stop_id]["types"].add(vtype)
+        if short_name:
+            by_stop[stop_id]["routes"].add(short_name)
+        if headsign:
+            by_stop[stop_id]["headsigns"].add(headsign)
+
+    to_insert: List[Tuple[str, str, str, str]] = []
+    for stop_id, data in by_stop.items():
+        primary_type = "bus"
+        for pt in ["metro", "train", "suburban_rail", "tram", "trolley", "boat", "bus"]:
+            if pt in data["types"]:
+                primary_type = pt
+                break
+        sorted_routes = sorted(data["routes"], key=lambda x: (len(x), x))
+        routes_str = ", ".join(sorted_routes[:10])
+        headsigns_str = " / ".join(list(data["headsigns"])[:2])
+        to_insert.append((stop_id, primary_type, routes_str, headsigns_str))
+
+    cur.execute("DROP TABLE IF EXISTS stop_platform_details")
+    cur.execute(
+        """
+        CREATE TABLE stop_platform_details (
+            stop_id TEXT PRIMARY KEY,
+            vehicle_type TEXT,
+            served_routes TEXT,
+            direction_headsigns TEXT
+        )
+        """
+    )
+    cur.executemany("INSERT INTO stop_platform_details VALUES (?, ?, ?, ?)", to_insert)
+    conn.commit()
+    print(f"[Platforms] Indexed {len(to_insert):,} stop platform details.")
+
+
 def create_lookup_indexes_and_optimize(conn: sqlite3.Connection) -> None:
     """Creates high-performance composite indexes for timetable and stop lookups."""
     cur = conn.cursor()
@@ -697,6 +775,7 @@ def main() -> int:
             )
 
         build_spatial_index_and_hubs(conn)
+        build_stop_platform_details(conn)
         create_lookup_indexes_and_optimize(conn)
 
         cur = conn.cursor()

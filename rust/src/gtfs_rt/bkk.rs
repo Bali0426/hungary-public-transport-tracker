@@ -90,24 +90,45 @@ pub fn decode_bkk_vehicle_positions_bytes(
         let raw_trip_id = vp.trip.as_ref().and_then(|t| t.trip_id.clone());
         let raw_route_id = vp.trip.as_ref().and_then(|t| t.route_id.clone());
 
+        // Skip parked / out-of-service depot vehicles that have neither trip_id nor route_id
+        if raw_trip_id.is_none() && raw_route_id.is_none() {
+            continue;
+        }
+
+        let vehicle_id = vp
+            .vehicle
+            .as_ref()
+            .and_then(|v| v.id.clone())
+            .unwrap_or(entity.id);
+        let raw_label = vp
+            .vehicle
+            .as_ref()
+            .and_then(|v| v.label.clone())
+            .unwrap_or_default();
+
         let prefixed_trip_id = raw_trip_id.as_ref().map(|t| format!("BKK:{}", t));
         let prefixed_route_id = raw_route_id.as_ref().map(|r| format!("BKK:{}", r));
 
         let delay_seconds = prefixed_trip_id
             .as_ref()
-            .and_then(|tid| trip_delays.get(tid).copied())
+            .and_then(|tid| {
+                trip_delays.get(tid).copied().or_else(|| {
+                    tid.split_once('-')
+                        .and_then(|(base, _)| trip_delays.get(base).copied())
+                })
+            })
             .unwrap_or(0);
 
         // Enrich line_name, headsign, and route_color from the bundled SQLite static DB if available
-        let mut line_name = vp
-            .vehicle
-            .as_ref()
-            .and_then(|v| v.label.clone())
-            .or_else(|| raw_route_id.clone())
-            .unwrap_or_else(|| "BKK".to_string());
+        let mut line_name = if !raw_label.is_empty() {
+            raw_label.clone()
+        } else {
+            raw_route_id.clone().unwrap_or_else(|| "BKK".to_string())
+        };
         let mut destination = String::new();
         let mut route_color = "009EE3".to_string();
         let mut route_type: Option<i32> = None;
+        let mut resolved_trip_id = prefixed_trip_id.clone();
 
         if let Some(db) = repo {
             if let Some(ref tid) = prefixed_trip_id {
@@ -126,6 +147,14 @@ pub fn decode_bkk_vehicle_positions_bytes(
                         if !rmeta.short_name.is_empty() {
                             line_name = rmeta.short_name;
                         }
+                        if destination.is_empty() {
+                            destination = rmeta
+                                .representative_headsign
+                                .unwrap_or(rmeta.long_name);
+                        }
+                        if rmeta.representative_trip_id.is_some() {
+                            resolved_trip_id = rmeta.representative_trip_id;
+                        }
                         route_color = rmeta.route_color;
                         route_type = Some(rmeta.route_type);
                     }
@@ -133,38 +162,100 @@ pub fn decode_bkk_vehicle_positions_bytes(
             }
         }
 
-        // Map GTFS route_type to clean category names
-        let vehicle_type = match route_type {
-            Some(0) => "tram",
-            Some(1) => "metro",
-            Some(2) => "train",
-            Some(3) => "bus",
-            Some(4) => "boat",
-            Some(11) => "trolley",
-            Some(109) => "suburban_rail", // HÉV
-            _ => {
-                let lower = line_name.to_lowercase();
-                if lower.starts_with('m') && lower.len() <= 3 {
-                    "metro"
-                } else if lower.starts_with('h') && lower.len() <= 3 {
-                    "suburban_rail"
-                } else {
-                    "bus"
+        // Detect MÁV-START / GYSEV national & suburban rail trains included in the GTFS-RT feed
+        let r_str = raw_route_id.as_deref().unwrap_or("");
+        let is_uic_train_id =
+            vehicle_id.len() == 12 && vehicle_id.chars().all(|c| c.is_ascii_digit());
+        let is_rail_route_code = matches!(
+            r_str,
+            "IC" | "EC" | "EN" | "IR" | "ER" | "RJ" | "RJX" | "S" | "GY" | "EX" | "SZ"
+        ) || ((r_str.starts_with('S')
+            || r_str.starts_with('G')
+            || r_str.starts_with('Z'))
+            && r_str.len() >= 2
+            && r_str.len() <= 4
+            && r_str[1..].chars().all(|c| c.is_ascii_digit()));
+
+        let is_mav_train = route_type.is_none() && (is_uic_train_id || is_rail_route_code);
+
+        let mut operator = Operator::BKK;
+        let vehicle_type: String;
+
+        if is_mav_train {
+            operator = Operator::MAV;
+            vehicle_type = "train".to_string();
+            route_color = "0057B8".to_string();
+
+            let train_num = raw_trip_id
+                .as_deref()
+                .and_then(|t| t.split('_').next())
+                .unwrap_or("");
+
+            line_name = if r_str == "S" && !train_num.is_empty() {
+                format!("S {}", train_num)
+            } else if !r_str.is_empty() {
+                r_str.to_string()
+            } else {
+                "MÁV".to_string()
+            };
+
+            destination = if !raw_label.is_empty() && !train_num.is_empty() {
+                format!("{} ({}. sz. vonat)", raw_label, train_num)
+            } else if !raw_label.is_empty() {
+                raw_label
+            } else {
+                "MÁV-START vasúti járat".to_string()
+            };
+
+            resolved_trip_id = raw_trip_id.as_ref().map(|t| format!("MAV:{}", t));
+        } else {
+            // If an unmatched BKK replacement bus (e.g. HP61) has raw_route_id and raw_label
+            if route_type.is_none() && !r_str.is_empty() && !raw_label.is_empty() && raw_label != r_str {
+                line_name = r_str.to_string();
+                if destination.is_empty() {
+                    destination = raw_label;
                 }
             }
-        }.to_string();
 
-        let vehicle_id = vp
-            .vehicle
-            .as_ref()
-            .and_then(|v| v.id.clone())
-            .unwrap_or(entity.id);
+            vehicle_type = match route_type {
+                Some(0) => "tram",
+                Some(1) => "metro",
+                Some(2) => "train",
+                Some(3) => "bus",
+                Some(4) => "boat",
+                Some(11) => "trolley",
+                Some(109) => "suburban_rail", // HÉV
+                _ => {
+                    let lower = line_name.to_lowercase();
+                    if lower.starts_with('m') && lower.len() <= 3 {
+                        "metro"
+                    } else if lower.starts_with('h')
+                        && lower.len() <= 3
+                        && lower[1..].chars().all(|c| c.is_ascii_digit())
+                    {
+                        "suburban_rail"
+                    } else {
+                        "bus"
+                    }
+                }
+            }
+            .to_string();
+        }
+
+        let final_id = match operator {
+            Operator::MAV => format!("MAV:{}", vehicle_id),
+            Operator::BKK => format!("BKK:{}", vehicle_id),
+        };
+        let final_route_id = raw_route_id.map(|r| match operator {
+            Operator::MAV => format!("MAV:{}", r),
+            Operator::BKK => format!("BKK:{}", r),
+        });
 
         results.push(UnifiedVehicle {
-            id: format!("BKK:{}", vehicle_id),
-            operator: Operator::BKK,
-            trip_id: prefixed_trip_id,
-            route_id: prefixed_route_id,
+            id: final_id,
+            operator,
+            trip_id: resolved_trip_id,
+            route_id: final_route_id,
             line_name,
             destination,
             lat: pos.latitude as f64,

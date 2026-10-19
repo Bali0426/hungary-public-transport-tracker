@@ -156,8 +156,8 @@ pub async fn poll_live_vehicles_geojson(
     Ok(vehicles_to_geojson(&vehicles))
 }
 
-/// Queries the SQLite R-Tree index for all stops inside the bounding box.
-pub fn get_stops_in_bbox(
+/// Queries the SQLite R-Tree index for stop groups / station hubs inside the bounding box.
+pub fn get_stop_groups_in_bbox(
     min_lat: f64,
     min_lon: f64,
     max_lat: f64,
@@ -168,7 +168,7 @@ pub fn get_stops_in_bbox(
     let Some(ref repo) = guard.repo else {
         anyhow::bail!("Static database is not initialized");
     };
-    repo.query_stops_in_bbox(
+    repo.query_stop_groups_in_bbox(
         BoundingBox {
             min_lat,
             min_lon,
@@ -177,6 +177,40 @@ pub fn get_stops_in_bbox(
         },
         limit,
     )
+}
+
+/// Queries the SQLite R-Tree index for individual platforms/posts (directions/perons) inside the bounding box.
+pub fn get_platforms_in_bbox(
+    min_lat: f64,
+    min_lon: f64,
+    max_lat: f64,
+    max_lon: f64,
+    limit: usize,
+) -> Result<Vec<StopNode>> {
+    let guard = ENGINE_STATE.read().unwrap();
+    let Some(ref repo) = guard.repo else {
+        anyhow::bail!("Static database is not initialized");
+    };
+    repo.query_platforms_in_bbox(
+        BoundingBox {
+            min_lat,
+            min_lon,
+            max_lat,
+            max_lon,
+        },
+        limit,
+    )
+}
+
+/// Queries the SQLite R-Tree index for all stops inside the bounding box.
+pub fn get_stops_in_bbox(
+    min_lat: f64,
+    min_lon: f64,
+    max_lat: f64,
+    max_lon: f64,
+    limit: usize,
+) -> Result<Vec<StopNode>> {
+    get_stop_groups_in_bbox(min_lat, min_lon, max_lat, max_lon, limit)
 }
 
 /// Searches stops and multimodal station hubs across BKK and MÁV by name.
@@ -212,6 +246,98 @@ pub fn get_station_departure_board(
         &guard.cached_trip_delays,
         limit,
     )
+}
+
+/// Returns the scheduled stop sequence and departure times for a given trip_id.
+pub fn get_trip_schedule(trip_id: String) -> Result<Vec<crate::static_db::repository::TripStopSchedule>> {
+    let (repo, client, bkk_key) = {
+        let guard = ENGINE_STATE.read().unwrap();
+        (
+            guard.repo.clone(),
+            guard.http_client.clone(),
+            guard.bkk_api_key.clone(),
+        )
+    };
+    if let Some(ref r) = repo {
+        if let Ok(local_stops) = r.get_trip_schedule(&trip_id) {
+            if !local_stops.is_empty() {
+                return Ok(local_stops);
+            }
+        }
+    }
+
+    // Fallback to live FUTÁR trip-details.json (covers MÁV trains and operative BKK trips)
+    if let Some(key) = bkk_key {
+        let raw_tid = trip_id
+            .strip_prefix("MAV:")
+            .or_else(|| trip_id.strip_prefix("BKK:"))
+            .unwrap_or(&trip_id)
+            .to_string();
+        let is_mav = trip_id.starts_with("MAV:");
+        let url = format!(
+            "https://go.bkk.hu/api/query/v1/ws/otp/api/where/trip-details.json?key={}&tripId=BKK_{}",
+            key, raw_tid
+        );
+        let live_stops = TOKIO_RT.block_on(async move {
+            let resp = client.get(&url).send().await.ok()?;
+            if !resp.status().is_success() {
+                return None;
+            }
+            let json: serde_json::Value = resp.json().await.ok()?;
+            let stops_ref = json.get("data")?.get("references")?.get("stops")?.as_object()?;
+            let stop_times = json.get("data")?.get("entry")?.get("stopTimes")?.as_array()?;
+            let mut out = Vec::with_capacity(stop_times.len());
+            for (idx, st) in stop_times.iter().enumerate() {
+                let stop_id = st.get("stopId").and_then(|v| v.as_str()).unwrap_or("");
+                let seq = st
+                    .get("stopSequence")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or((idx + 1) as i64) as i32;
+                let stop_name = stops_ref
+                    .get(stop_id)
+                    .and_then(|s| s.get("name"))
+                    .and_then(|n| n.as_str())
+                    .unwrap_or(stop_id)
+                    .to_string();
+                let ts = st
+                    .get("predictedDepartureTime")
+                    .or_else(|| st.get("departureTime"))
+                    .or_else(|| st.get("predictedArrivalTime"))
+                    .or_else(|| st.get("arrivalTime"))
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0);
+                let dep_fmt = if ts > 0 {
+                    use chrono::TimeZone;
+                    if let Some(dt) = chrono::Local.timestamp_opt(ts, 0).single() {
+                        dt.format("%H:%M").to_string()
+                    } else {
+                        "--:--".to_string()
+                    }
+                } else {
+                    "--:--".to_string()
+                };
+                out.push(crate::static_db::repository::TripStopSchedule {
+                    stop_sequence: seq,
+                    stop_id: stop_id.to_string(),
+                    stop_name,
+                    departure_time: dep_fmt,
+                    operator: if is_mav {
+                        "MAV".to_string()
+                    } else {
+                        "BKK".to_string()
+                    },
+                });
+            }
+            Some(out)
+        });
+        if let Some(stops) = live_stops {
+            if !stops.is_empty() {
+                return Ok(stops);
+            }
+        }
+    }
+
+    Ok(Vec::new())
 }
 
 // ============================================================================
@@ -283,6 +409,34 @@ pub extern "C" fn transit_poll_live_vehicles_geojson(
 }
 
 #[no_mangle]
+pub extern "C" fn transit_get_stop_groups_in_bbox_json(
+    min_lat: f64,
+    min_lon: f64,
+    max_lat: f64,
+    max_lon: f64,
+    limit: usize,
+) -> *mut c_char {
+    match get_stop_groups_in_bbox(min_lat, min_lon, max_lat, max_lon, limit) {
+        Ok(stops) => into_c_string_ptr(serde_json::to_string(&stops).unwrap_or_else(|_| "[]".into())),
+        Err(_) => into_c_string_ptr("[]".to_string()),
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn transit_get_platforms_in_bbox_json(
+    min_lat: f64,
+    min_lon: f64,
+    max_lat: f64,
+    max_lon: f64,
+    limit: usize,
+) -> *mut c_char {
+    match get_platforms_in_bbox(min_lat, min_lon, max_lat, max_lon, limit) {
+        Ok(stops) => into_c_string_ptr(serde_json::to_string(&stops).unwrap_or_else(|_| "[]".into())),
+        Err(_) => into_c_string_ptr("[]".to_string()),
+    }
+}
+
+#[no_mangle]
 pub extern "C" fn transit_get_stops_in_bbox_json(
     min_lat: f64,
     min_lon: f64,
@@ -317,6 +471,17 @@ pub unsafe extern "C" fn transit_get_departure_board_json(
     let id = from_c_str(stop_or_hub_id_ptr);
     match get_station_departure_board(id, horizon_minutes, limit) {
         Ok(deps) => into_c_string_ptr(serde_json::to_string(&deps).unwrap_or_else(|_| "[]".into())),
+        Err(_) => into_c_string_ptr("[]".to_string()),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn transit_get_trip_schedule_json(
+    trip_id_ptr: *const c_char,
+) -> *mut c_char {
+    let trip_id = from_c_str(trip_id_ptr);
+    match get_trip_schedule(trip_id) {
+        Ok(stops) => into_c_string_ptr(serde_json::to_string(&stops).unwrap_or_else(|_| "[]".into())),
         Err(_) => into_c_string_ptr("[]".to_string()),
     }
 }

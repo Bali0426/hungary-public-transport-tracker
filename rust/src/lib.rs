@@ -120,9 +120,16 @@ mod tests {
                         *type_counts.entry(v.vehicle_type.clone()).or_insert(0) += 1;
                     }
                     println!("Vehicle type counts with static DB: {:?}", type_counts);
-                    for v in vehicles.iter().take(5) {
-                        println!("Sample: line={}, type={}, dest={}", v.line_name, v.vehicle_type, v.destination);
+                    let mut op_counts = HashMap::new();
+                    for v in &vehicles {
+                        *op_counts.entry(v.operator.as_str()).or_insert(0) += 1;
                     }
+                    println!("Operator counts: {:?}", op_counts);
+                    for v in vehicles.iter().filter(|v| v.operator == crate::gtfs_rt::models::Operator::MAV).take(10) {
+                        println!("  MÁV Train: id={}, line={}, dest={}, trip={:?}", v.id, v.line_name, v.destination, v.trip_id);
+                    }
+                    let empty_dest_count = vehicles.iter().filter(|v| v.destination.is_empty()).count();
+                    println!("Vehicles with empty destination: {} / {}", empty_dest_count, vehicles.len());
                     assert!(!vehicles.is_empty(), "Vehicle list should not be empty");
                 }
                 Err(e) => {
@@ -130,5 +137,41 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_departure_board_query() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let client = reqwest::Client::new();
+            let url = "https://go.bkk.hu/api/query/v1/ws/gtfs-rt/full/TripUpdates.pb?key=b4beebb5-1ecb-45fd-a83d-3374edb83a2b";
+            if let Ok(resp) = client.get(url).send().await {
+                if let Ok(bytes) = resp.bytes().await {
+                    use prost::Message;
+                    let feed = crate::gtfs_rt::proto::FeedMessage::decode(bytes.as_ref()).unwrap();
+                    println!("TripUpdates entities: {}", feed.entity.len());
+                    for ent in feed.entity.iter().take(10) {
+                        if let Some(ref tu) = ent.trip_update {
+                            println!("  TU trip={:?}, route={:?}, stops={}", tu.trip.trip_id, tu.trip.route_id, tu.stop_time_update.len());
+                            if let Some(first_stu) = tu.stop_time_update.first() {
+                                println!("    first stop_id={:?}, seq={:?}, dep={:?}, arr={:?}", first_stu.stop_id, first_stu.stop_sequence, first_stu.departure, first_stu.arrival);
+                            }
+                        }
+                    }
+                    // Check if any MÁV train is in TripUpdates
+                    let mav_tu: Vec<_> = feed.entity.iter().filter(|e| {
+                        e.trip_update.as_ref().and_then(|t| t.trip.route_id.as_deref()).map(|r| r == "IC" || r == "S10" || r == "G60").unwrap_or(false)
+                    }).collect();
+                    println!("MÁV TripUpdates count (IC/S10/G60): {}", mav_tu.len());
+                    if let Some(m) = mav_tu.first() {
+                        let tu = m.trip_update.as_ref().unwrap();
+                        println!("  Sample MÁV TU: trip={:?}, route={:?}, stops={}", tu.trip.trip_id, tu.trip.route_id, tu.stop_time_update.len());
+                        for stu in tu.stop_time_update.iter().take(5) {
+                            println!("    stop_id={:?}, seq={:?}, dep={:?}, arr={:?}", stu.stop_id, stu.stop_sequence, stu.departure, stu.arrival);
+                        }
+                    }
+                }
+            }
+        });
     }
 }

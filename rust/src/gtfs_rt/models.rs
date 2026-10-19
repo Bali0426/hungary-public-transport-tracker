@@ -69,6 +69,12 @@ pub struct StopNode {
     pub operator: Operator,
     pub platform_code: Option<String>,
     pub is_multimodal_hub: bool,
+    #[serde(default)]
+    pub vehicle_type: Option<String>,
+    #[serde(default)]
+    pub served_routes: Option<String>,
+    #[serde(default)]
+    pub direction: Option<String>,
 }
 
 /// A single row on the unified station departure board (combining static schedule + live delay).

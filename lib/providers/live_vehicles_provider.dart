@@ -18,7 +18,6 @@ class ViewportBbox {
     required this.maxLon,
   });
 
-
   const ViewportBbox._({
     required this.minLat,
     required this.minLon,
@@ -43,30 +42,34 @@ final mapDarkModeProvider = StateProvider<bool>((ref) => true);
 
 /// Transit mode filter: set of enabled transit types (bus, tram, metro, trolley, train, suburban_rail, boat)
 final enabledTransitModesProvider = StateProvider<Set<String>>((ref) => {
-  'bus',
-  'tram',
-  'metro',
-  'trolley',
-  'train',
-  'suburban_rail',
-  'boat',
-});
+      'bus',
+      'tram',
+      'metro',
+      'trolley',
+      'train',
+      'suburban_rail',
+      'boat',
+    });
 
-/// Whether static stops and station hubs should be displayed on the map
-final showStopsProvider = StateProvider<bool>((ref) => true);
+/// Whether stop groups / station hubs should be displayed on the map
+final showStopGroupsProvider = StateProvider<bool>((ref) => false);
 
-/// Cache of the last successfully polled GeoJSON to prevent flickering when camera moves
+/// Whether individual platforms / stop posts (directions) should be displayed on the map
+final showPlatformsProvider = StateProvider<bool>((ref) => false);
+
+/// Legacy stops toggle provider
+final showStopsProvider = StateProvider<bool>((ref) => false);
+
+/// Cache of the last successfully polled GeoJSON to prevent any flickering
 String _lastEmittedGeoJson = '';
 
-/// Foreground-aware periodic stream of GeoJSON FeatureCollections from the Rust engine.
-/// Keeps existing vehicles on screen while new coordinates are polled.
-final liveVehiclesGeoJsonProvider = StreamProvider.autoDispose<String>((ref) {
-  final bbox = ref.watch(viewportBboxProvider);
+/// Periodic stream of GeoJSON FeatureCollections covering all active BKK and MÁV vehicles in Hungary.
+/// Decoupled from camera movements (`viewportBboxProvider`) so panning/zooming never reloads or drops vehicles.
+final liveVehiclesGeoJsonProvider = StreamProvider<String>((ref) {
   final controller = StreamController<String>();
   Timer? timer;
   bool isDisposed = false;
 
-  // Emit last known vehicles immediately to avoid any flickering/disappearance on camera move
   if (_lastEmittedGeoJson.isNotEmpty) {
     controller.add(_lastEmittedGeoJson);
   }
@@ -74,11 +77,12 @@ final liveVehiclesGeoJsonProvider = StreamProvider.autoDispose<String>((ref) {
   Future<void> pollOnce() async {
     if (isDisposed) return;
     try {
+      // Poll the full Hungary bounding box once every 10s so camera pan/zoom is 100% lag-free
       final geoJson = await TransitRustBridge.instance.pollLiveVehiclesGeoJson(
-        minLat: bbox.minLat,
-        minLon: bbox.minLon,
-        maxLat: bbox.maxLat,
-        maxLon: bbox.maxLon,
+        minLat: 45.70,
+        minLon: 16.00,
+        maxLat: 48.65,
+        maxLon: 23.00,
       );
       if (!isDisposed && geoJson.isNotEmpty) {
         _lastEmittedGeoJson = geoJson;
@@ -103,17 +107,51 @@ final liveVehiclesGeoJsonProvider = StreamProvider.autoDispose<String>((ref) {
   return controller.stream;
 });
 
-/// Queries R-Tree indexed static stops inside the current map viewport.
-final viewportStopsProvider = FutureProvider.autoDispose<List<StopNode>>((ref) {
-  final showStops = ref.watch(showStopsProvider);
-  if (!showStops) return Future.value(const <StopNode>[]);
+List<StopNode> _lastStopGroupsCache = const [];
+
+/// Queries R-Tree indexed static stop groups inside the current map viewport (debounced on camera idle).
+final viewportStopGroupsProvider = FutureProvider<List<StopNode>>((ref) async {
+  final showGroups = ref.watch(showStopGroupsProvider);
+  if (!showGroups) return const <StopNode>[];
 
   final bbox = ref.watch(viewportBboxProvider);
-  return TransitRustBridge.instance.getStopsInBbox(
-    minLat: bbox.minLat,
-    minLon: bbox.minLon,
-    maxLat: bbox.maxLat,
-    maxLon: bbox.maxLon,
-    limit: 250,
-  );
+  try {
+    final groups = await TransitRustBridge.instance.getStopGroupsInBbox(
+      minLat: bbox.minLat,
+      minLon: bbox.minLon,
+      maxLat: bbox.maxLat,
+      maxLon: bbox.maxLon,
+      limit: 250,
+    );
+    _lastStopGroupsCache = groups;
+    return groups;
+  } catch (_) {
+    return _lastStopGroupsCache;
+  }
 });
+
+List<StopNode> _lastPlatformsCache = const [];
+
+/// Queries R-Tree indexed individual platforms/directions inside the current map viewport (debounced on camera idle).
+final viewportPlatformsProvider = FutureProvider<List<StopNode>>((ref) async {
+  final showPlatforms = ref.watch(showPlatformsProvider);
+  if (!showPlatforms) return const <StopNode>[];
+
+  final bbox = ref.watch(viewportBboxProvider);
+  try {
+    final platforms = await TransitRustBridge.instance.getPlatformsInBbox(
+      minLat: bbox.minLat,
+      minLon: bbox.minLon,
+      maxLat: bbox.maxLat,
+      maxLon: bbox.maxLon,
+      limit: 300,
+    );
+    _lastPlatformsCache = platforms;
+    return platforms;
+  } catch (_) {
+    return _lastPlatformsCache;
+  }
+});
+
+/// Legacy / general stops provider alias for backward compatibility
+final viewportStopsProvider = viewportStopGroupsProvider;

@@ -26,3 +26,13 @@ final stopSearchProvider = FutureProvider.autoDispose
     limit: 30,
   );
 });
+
+/// Scheduled stop sequence and departure times for a trip.
+final tripScheduleProvider = FutureProvider.autoDispose
+    .family<List<TripStopSchedule>, String>((ref, tripId) async {
+  if (tripId.trim().isEmpty) {
+    return const [];
+  }
+  return TransitRustBridge.instance.getTripSchedule(tripId: tripId);
+});
+

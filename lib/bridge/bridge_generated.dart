@@ -71,6 +71,9 @@ class StopNode {
   final Operator operator;
   final String? platformCode;
   final bool isMultimodalHub;
+  final String? vehicleType;
+  final String? servedRoutes;
+  final String? direction;
 
   const StopNode({
     required this.id,
@@ -81,6 +84,9 @@ class StopNode {
     required this.operator,
     this.platformCode,
     required this.isMultimodalHub,
+    this.vehicleType,
+    this.servedRoutes,
+    this.direction,
   });
 
   factory StopNode.fromJson(Map<String, dynamic> json) {
@@ -94,6 +100,9 @@ class StopNode {
       operator: opStr == 'MAV' ? Operator.mav : Operator.bkk,
       platformCode: json['platform_code'] as String?,
       isMultimodalHub: json['is_multimodal_hub'] as bool? ?? false,
+      vehicleType: json['vehicle_type'] as String?,
+      servedRoutes: json['served_routes'] as String?,
+      direction: json['direction'] as String?,
     );
   }
 }
@@ -150,6 +159,32 @@ class UnifiedDeparture {
       estimatedTimeFormatted: json['estimated_time_formatted'] as String,
       isRealtime: json['is_realtime'] as bool? ?? false,
       platformCode: json['platform_code'] as String?,
+    );
+  }
+}
+
+class TripStopSchedule {
+  final int stopSequence;
+  final String stopId;
+  final String stopName;
+  final String departureTime;
+  final String operator;
+
+  const TripStopSchedule({
+    required this.stopSequence,
+    required this.stopId,
+    required this.stopName,
+    required this.departureTime,
+    required this.operator,
+  });
+
+  factory TripStopSchedule.fromJson(Map<String, dynamic> json) {
+    return TripStopSchedule(
+      stopSequence: (json['stop_sequence'] as num).toInt(),
+      stopId: json['stop_id'] as String,
+      stopName: json['stop_name'] as String,
+      departureTime: json['departure_time'] as String,
+      operator: json['operator'] as String? ?? 'BKK',
     );
   }
 }
@@ -212,6 +247,13 @@ typedef _GetDepartureBoardDart = Pointer<Utf8> Function(
   Pointer<Utf8> stopOrHubId,
   int horizonMinutes,
   int limit,
+);
+
+typedef _GetTripScheduleNative = Pointer<Utf8> Function(
+  Pointer<Utf8> tripId,
+);
+typedef _GetTripScheduleDart = Pointer<Utf8> Function(
+  Pointer<Utf8> tripId,
 );
 
 typedef _FreeStringNative = Void Function(Pointer<Utf8> ptr);
@@ -292,7 +334,7 @@ class TransitRustBridge {
     });
   }
 
-  Future<List<StopNode>> getStopsInBbox({
+  Future<List<StopNode>> getStopGroupsInBbox({
     required double minLat,
     required double minLon,
     required double maxLat,
@@ -302,7 +344,7 @@ class TransitRustBridge {
     final rawJson = await Isolate.run(() {
       final lib = _openLibrary();
       final fn = lib.lookupFunction<_GetStopsInBboxNative, _GetStopsInBboxDart>(
-        'transit_get_stops_in_bbox_json',
+        'transit_get_stop_groups_in_bbox_json',
       );
       final freeFn = lib.lookupFunction<_FreeStringNative, _FreeStringDart>(
         'transit_free_string',
@@ -318,6 +360,50 @@ class TransitRustBridge {
     return decoded
         .map((e) => StopNode.fromJson(e as Map<String, dynamic>))
         .toList();
+  }
+
+  Future<List<StopNode>> getPlatformsInBbox({
+    required double minLat,
+    required double minLon,
+    required double maxLat,
+    required double maxLon,
+    int limit = 300,
+  }) async {
+    final rawJson = await Isolate.run(() {
+      final lib = _openLibrary();
+      final fn = lib.lookupFunction<_GetStopsInBboxNative, _GetStopsInBboxDart>(
+        'transit_get_platforms_in_bbox_json',
+      );
+      final freeFn = lib.lookupFunction<_FreeStringNative, _FreeStringDart>(
+        'transit_free_string',
+      );
+      final ptr = fn(minLat, minLon, maxLat, maxLon, limit);
+      try {
+        return ptr.toDartString();
+      } finally {
+        freeFn(ptr);
+      }
+    });
+    final decoded = jsonDecode(rawJson) as List<dynamic>;
+    return decoded
+        .map((e) => StopNode.fromJson(e as Map<String, dynamic>))
+        .toList();
+  }
+
+  Future<List<StopNode>> getStopsInBbox({
+    required double minLat,
+    required double minLon,
+    required double maxLat,
+    required double maxLon,
+    int limit = 250,
+  }) async {
+    return getStopGroupsInBbox(
+      minLat: minLat,
+      minLon: minLon,
+      maxLat: maxLat,
+      maxLon: maxLon,
+      limit: limit,
+    );
   }
 
   Future<List<StopNode>> searchStops({
@@ -373,6 +459,32 @@ class TransitRustBridge {
     final decoded = jsonDecode(rawJson) as List<dynamic>;
     return decoded
         .map((e) => UnifiedDeparture.fromJson(e as Map<String, dynamic>))
+        .toList();
+  }
+
+  Future<List<TripStopSchedule>> getTripSchedule({
+    required String tripId,
+  }) async {
+    final rawJson = await Isolate.run(() {
+      final lib = _openLibrary();
+      final fn = lib.lookupFunction<_GetTripScheduleNative, _GetTripScheduleDart>(
+        'transit_get_trip_schedule_json',
+      );
+      final freeFn = lib.lookupFunction<_FreeStringNative, _FreeStringDart>(
+        'transit_free_string',
+      );
+      final idPtr = tripId.toNativeUtf8();
+      final ptr = fn(idPtr);
+      try {
+        return ptr.toDartString();
+      } finally {
+        calloc.free(idPtr);
+        freeFn(ptr);
+      }
+    });
+    final decoded = jsonDecode(rawJson) as List<dynamic>;
+    return decoded
+        .map((e) => TripStopSchedule.fromJson(e as Map<String, dynamic>))
         .toList();
   }
 }

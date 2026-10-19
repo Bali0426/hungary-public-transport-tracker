@@ -15,6 +15,8 @@ pub struct RouteMetadata {
     pub route_color: String,
     pub route_text_color: String,
     pub route_type: i32,
+    pub representative_trip_id: Option<String>,
+    pub representative_headsign: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -52,11 +54,22 @@ impl StaticTransitRepository {
             .context("Failed to checkout connection from SQLite pool")
     }
 
-    /// Looks up route display name and hex color for a given `route_id`.
+    /// Looks up route display name, hex color, and a representative trip/headsign for a given `route_id`.
     pub fn lookup_route_metadata(&self, route_id: &str) -> Result<Option<RouteMetadata>> {
         let conn = self.get_conn()?;
         let mut stmt = conn.prepare_cached(
-            "SELECT short_name, long_name, route_color, route_text_color, route_type FROM routes WHERE id = ?1",
+            r#"
+            SELECT
+                r.short_name,
+                r.long_name,
+                r.route_color,
+                r.route_text_color,
+                r.route_type,
+                (SELECT t.id FROM trips t WHERE t.route_id = r.id LIMIT 1) AS rep_trip_id,
+                (SELECT t.trip_headsign FROM trips t WHERE t.route_id = r.id AND t.trip_headsign != '' LIMIT 1) AS rep_headsign
+            FROM routes r
+            WHERE r.id = ?1
+            "#,
         )?;
         let res = stmt
             .query_row(params![route_id], |row| {
@@ -66,6 +79,8 @@ impl StaticTransitRepository {
                     route_color: row.get(2)?,
                     route_text_color: row.get(3)?,
                     route_type: row.get(4)?,
+                    representative_trip_id: row.get(5)?,
+                    representative_headsign: row.get(6)?,
                 })
             })
             .optional()?;
@@ -73,6 +88,7 @@ impl StaticTransitRepository {
     }
 
     /// Looks up trip headsign, route short_name, and color for a given `trip_id`.
+    /// Automatically strips operative date suffixes (e.g., `BKK:D113623178-20261019-02` -> `BKK:D113623178`).
     pub fn lookup_trip_metadata(&self, trip_id: &str) -> Result<Option<TripMetadata>> {
         let conn = self.get_conn()?;
         let mut stmt = conn.prepare_cached(
@@ -94,7 +110,24 @@ impl StaticTransitRepository {
                 })
             })
             .optional()?;
-        Ok(res)
+        if res.is_some() {
+            return Ok(res);
+        }
+        if let Some((base_id, _)) = trip_id.split_once('-') {
+            let res2 = stmt
+                .query_row(params![base_id], |row| {
+                    Ok(TripMetadata {
+                        route_id: row.get(0)?,
+                        short_name: row.get(1)?,
+                        headsign: row.get(2)?,
+                        route_color: row.get(3)?,
+                        route_type: row.get(4)?,
+                    })
+                })
+                .optional()?;
+            return Ok(res2);
+        }
+        Ok(None)
     }
 
     /// Fuzzy/prefix stop and station hub search across both BKK and MÁV.
@@ -142,6 +175,9 @@ impl StaticTransitRepository {
                 operator: Operator::from_prefix(&op_str),
                 platform_code: row.get(6)?,
                 is_multimodal_hub: is_mm != 0,
+                vehicle_type: None,
+                served_routes: None,
+                direction: None,
             })
         })?;
 
@@ -291,6 +327,73 @@ impl StaticTransitRepository {
         departures.sort_by_key(|d| d.estimated_departure_seconds);
         Ok(departures)
     }
+
+    /// Queries the scheduled stop sequence and departure times for a given trip_id.
+    pub fn get_trip_schedule(&self, trip_id: &str) -> Result<Vec<TripStopSchedule>> {
+        let conn = self.get_conn()?;
+        let mut stmt = conn.prepare_cached(r#"
+            SELECT
+                st.stop_sequence,
+                st.stop_id,
+                s.name,
+                st.departure_time,
+                s.operator_type
+            FROM stop_times st
+            JOIN stops s ON s.id = st.stop_id
+            WHERE st.trip_id = ?1
+            ORDER BY st.stop_sequence ASC
+        "#)?;
+
+        let rows = stmt.query_map(params![trip_id], |row| {
+            Ok(TripStopSchedule {
+                stop_sequence: row.get(0)?,
+                stop_id: row.get(1)?,
+                stop_name: row.get(2)?,
+                departure_time: row.get(3)?,
+                operator: row.get(4)?,
+            })
+        })?;
+
+        let mut list = Vec::new();
+        for r in rows {
+            list.push(r?);
+        }
+
+        // If not found and trip_id has an operative suffix (e.g. -20261019-01), strip it
+        if list.is_empty() {
+            if let Some((base_id, _)) = trip_id.split_once('-') {
+                let rows2 = stmt.query_map(params![base_id], |row| {
+                    Ok(TripStopSchedule {
+                        stop_sequence: row.get(0)?,
+                        stop_id: row.get(1)?,
+                        stop_name: row.get(2)?,
+                        departure_time: row.get(3)?,
+                        operator: row.get(4)?,
+                    })
+                })?;
+                for r in rows2 {
+                    list.push(r?);
+                }
+            }
+        }
+
+        // If not found and trip_id lacks BKK: or MAV: prefix, retry with prefix
+        if list.is_empty() && !trip_id.starts_with("BKK:") && !trip_id.starts_with("MAV:") {
+            let bkk_id = format!("BKK:{}", trip_id);
+            return self.get_trip_schedule(&bkk_id);
+        }
+
+        Ok(list)
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TripStopSchedule {
+    pub stop_sequence: i32,
+    pub stop_id: String,
+    pub stop_name: String,
+    pub departure_time: String,
+    pub operator: String,
 }
 
 fn format_hhmm(seconds: i32, fallback: &str) -> String {
