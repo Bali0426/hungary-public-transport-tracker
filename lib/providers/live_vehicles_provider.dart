@@ -52,13 +52,24 @@ final enabledTransitModesProvider = StateProvider<Set<String>>((ref) => {
   'boat',
 });
 
+/// Whether static stops and station hubs should be displayed on the map
+final showStopsProvider = StateProvider<bool>((ref) => true);
+
+/// Cache of the last successfully polled GeoJSON to prevent flickering when camera moves
+String _lastEmittedGeoJson = '';
+
 /// Foreground-aware periodic stream of GeoJSON FeatureCollections from the Rust engine.
-/// Polls every 12 seconds and immediately whenever the user pans/zooms the viewport.
+/// Keeps existing vehicles on screen while new coordinates are polled.
 final liveVehiclesGeoJsonProvider = StreamProvider.autoDispose<String>((ref) {
   final bbox = ref.watch(viewportBboxProvider);
   final controller = StreamController<String>();
   Timer? timer;
   bool isDisposed = false;
+
+  // Emit last known vehicles immediately to avoid any flickering/disappearance on camera move
+  if (_lastEmittedGeoJson.isNotEmpty) {
+    controller.add(_lastEmittedGeoJson);
+  }
 
   Future<void> pollOnce() async {
     if (isDisposed) return;
@@ -69,18 +80,19 @@ final liveVehiclesGeoJsonProvider = StreamProvider.autoDispose<String>((ref) {
         maxLat: bbox.maxLat,
         maxLon: bbox.maxLon,
       );
-      if (!isDisposed) {
+      if (!isDisposed && geoJson.isNotEmpty) {
+        _lastEmittedGeoJson = geoJson;
         controller.add(geoJson);
       }
     } catch (e, st) {
-      if (!isDisposed) {
+      if (!isDisposed && _lastEmittedGeoJson.isEmpty) {
         controller.addError(e, st);
       }
     }
   }
 
   pollOnce();
-  timer = Timer.periodic(const Duration(seconds: 12), (_) => pollOnce());
+  timer = Timer.periodic(const Duration(seconds: 10), (_) => pollOnce());
 
   ref.onDispose(() {
     isDisposed = true;
@@ -93,6 +105,9 @@ final liveVehiclesGeoJsonProvider = StreamProvider.autoDispose<String>((ref) {
 
 /// Queries R-Tree indexed static stops inside the current map viewport.
 final viewportStopsProvider = FutureProvider.autoDispose<List<StopNode>>((ref) {
+  final showStops = ref.watch(showStopsProvider);
+  if (!showStops) return Future.value(const <StopNode>[]);
+
   final bbox = ref.watch(viewportBboxProvider);
   return TransitRustBridge.instance.getStopsInBbox(
     minLat: bbox.minLat,

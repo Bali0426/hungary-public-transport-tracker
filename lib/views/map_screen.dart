@@ -22,6 +22,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
   static const LatLng _budapestCenter = LatLng(47.4979, 19.0402);
 
   void _onPositionChanged(MapCamera camera, bool hasGesture) {
+    if (!hasGesture) return;
     final bounds = camera.visibleBounds;
     ref.read(viewportBboxProvider.notifier).state = ViewportBbox(
       minLat: bounds.south,
@@ -103,34 +104,53 @@ class _MapScreenState extends ConsumerState<MapScreen> {
           _ => const Color(0xFF22C55E),
         };
 
+        final typeIcon = _getModeIconData(vType);
+
         markers.add(
           Marker(
             point: LatLng(lat, lon),
-            width: 46,
-            height: 38,
+            width: 52,
+            height: 40,
             child: GestureDetector(
               onTap: () => _onVehicleTapped(props),
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1.5),
+                    padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
                     decoration: BoxDecoration(
                       color: const Color(0xFF0F172A),
                       borderRadius: BorderRadius.circular(4),
                       border: Border.all(color: dotColor, width: 1.5),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withValues(alpha: 0.6),
+                          blurRadius: 3,
+                        ),
+                      ],
                     ),
-                    child: Text(
-                      lineName,
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 9,
-                        fontWeight: FontWeight.bold,
-                      ),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(typeIcon, size: 10, color: Colors.white70),
+                        const SizedBox(width: 2),
+                        ConstrainedBox(
+                          constraints: const BoxConstraints(maxWidth: 32),
+                          child: Text(
+                            lineName,
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 9,
+                              fontWeight: FontWeight.bold,
+                            ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                      ],
                     ),
                   ),
+                  const SizedBox(height: 1),
                   Container(
                     width: 7,
                     height: 7,
@@ -139,7 +159,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                       shape: BoxShape.circle,
                       boxShadow: [
                         BoxShadow(
-                          color: dotColor.withValues(alpha: 0.7),
+                          color: dotColor.withValues(alpha: 0.8),
                           blurRadius: 4,
                         ),
                       ],
@@ -157,14 +177,64 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     }
   }
 
+  List<Marker> _buildStopMarkers(List<StopNode> stops) {
+    final markers = <Marker>[];
+    for (final s in stops) {
+      final isHub = s.isMultimodalHub;
+      final Color markerColor = isHub
+          ? const Color(0xFF818CF8) // Indigo for Multimodal Hub
+          : (s.operator == Operator.mav
+              ? const Color(0xFF0284C7) // Sky blue for MÁV
+              : const Color(0xFF06B6D4)); // Cyan for BKK
+
+      markers.add(
+        Marker(
+          point: LatLng(s.lat, s.lon),
+          width: isHub ? 36 : 24,
+          height: isHub ? 36 : 24,
+          child: GestureDetector(
+            onTap: () => _openStationSheet(s),
+            child: Container(
+              decoration: BoxDecoration(
+                color: const Color(0xD90F172A),
+                shape: BoxShape.circle,
+                border: Border.all(color: markerColor, width: isHub ? 2.5 : 1.5),
+                boxShadow: [
+                  BoxShadow(
+                    color: markerColor.withValues(alpha: 0.5),
+                    blurRadius: isHub ? 6 : 3,
+                  ),
+                ],
+              ),
+              child: Icon(
+                isHub
+                    ? Icons.hub
+                    : (s.operator == Operator.mav ? Icons.train : Icons.directions_bus),
+                size: isHub ? 18 : 12,
+                color: markerColor,
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+    return markers;
+  }
+
   @override
   Widget build(BuildContext context) {
     final liveVehiclesAsync = ref.watch(liveVehiclesGeoJsonProvider);
+    final stopsAsync = ref.watch(viewportStopsProvider);
     final enabledModes = ref.watch(enabledTransitModesProvider);
     final isDarkMode = ref.watch(mapDarkModeProvider);
 
     final vehicleMarkers = liveVehiclesAsync.maybeWhen(
       data: (geojson) => _buildVehicleMarkers(geojson, enabledModes),
+      orElse: () => const <Marker>[],
+    );
+
+    final stopMarkers = stopsAsync.maybeWhen(
+      data: _buildStopMarkers,
       orElse: () => const <Marker>[],
     );
 
@@ -206,13 +276,29 @@ class _MapScreenState extends ConsumerState<MapScreen> {
               ),
             ),
             children: [
-              TileLayer(
-                urlTemplate: isDarkMode
-                    ? 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png'
-                    : 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-                subdomains: isDarkMode ? const ['a', 'b', 'c', 'd'] : const [],
-                userAgentPackageName: 'hungary.public.transport.tracker',
+              // OpenStreetMap base tile layer with optional CSS grayscale/dark colorFilter
+              ColorFiltered(
+                colorFilter: isDarkMode
+                    ? const ColorFilter.matrix(<double>[
+                        -0.65, 0.0, 0.0, 0.0, 210.0,
+                        0.0, -0.65, 0.0, 0.0, 210.0,
+                        0.0, 0.0, -0.65, 0.0, 210.0,
+                        0.0, 0.0, 0.0, 1.0, 0.0,
+                      ])
+                    : const ColorFilter.mode(
+                        Colors.transparent,
+                        BlendMode.multiply,
+                      ),
+                child: TileLayer(
+                  urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+                  userAgentPackageName: 'hungary.public.transport.tracker',
+                ),
               ),
+
+              // Static Stops & Station Hubs Layer
+              MarkerLayer(markers: stopMarkers),
+
+              // Live Vehicle Positions Layer
               MarkerLayer(markers: vehicleMarkers),
             ],
           ),
@@ -224,7 +310,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
             child: _LiveFeedStatusPill(),
           ),
 
-          // Top-Right & Bottom-Right Control Panel
+          // Bottom-Right Control Panel
           Positioned(
             right: 16,
             bottom: 24,
@@ -232,11 +318,14 @@ class _MapScreenState extends ConsumerState<MapScreen> {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.end,
               children: [
-                // Dark Mode Toggle Button
+                // Stops Layer Visibility Toggle Button
+                _StopsLayerToggleButton(),
+                const SizedBox(height: 10),
+                // Dark Mode Toggle Button (using pure OSM + ColorFilter)
                 _DarkModeToggleButton(),
-                const SizedBox(height: 12),
-                // Transit Modes Visibility Filter Menu Button
-                _TransitModesFilterMenu(),
+                const SizedBox(height: 10),
+                // Transit Modes Visibility Filter Menu Button (with explicit Done/Close button)
+                _TransitModesFilterButton(),
               ],
             ),
           ),
@@ -247,7 +336,32 @@ class _MapScreenState extends ConsumerState<MapScreen> {
 }
 
 // ---------------------------------------------------------------------------
-// Dark Mode Toggle Button
+// Stops Layer Toggle Button
+// ---------------------------------------------------------------------------
+class _StopsLayerToggleButton extends ConsumerWidget {
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final showStops = ref.watch(showStopsProvider);
+
+    return FloatingActionButton.small(
+      heroTag: 'stops_layer_toggle',
+      tooltip: showStops ? 'Megállók elrejtése' : 'Megállók megjelenítése',
+      backgroundColor: const Color(0xE60F172A),
+      foregroundColor: showStops ? const Color(0xFF38BDF8) : Colors.white54,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(12),
+        side: const BorderSide(color: Colors.white24, width: 1),
+      ),
+      onPressed: () {
+        ref.read(showStopsProvider.notifier).state = !showStops;
+      },
+      child: Icon(showStops ? Icons.pin_drop : Icons.pin_drop_outlined, size: 20),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Dark Mode Toggle Button (OSM Tile filter)
 // ---------------------------------------------------------------------------
 class _DarkModeToggleButton extends ConsumerWidget {
   @override
@@ -272,9 +386,9 @@ class _DarkModeToggleButton extends ConsumerWidget {
 }
 
 // ---------------------------------------------------------------------------
-// Transit Modes Filter Menu (Bus, Tram, Metro, Trolley, Train, HÉV, Boat)
+// Transit Modes Filter Button with Persistent Modal Dialog (Does NOT close on click)
 // ---------------------------------------------------------------------------
-class _TransitModesFilterMenu extends ConsumerWidget {
+class _TransitModesFilterButton extends ConsumerWidget {
   static const Map<String, ({String label, IconData icon})> _modes = {
     'bus': (label: 'Busz', icon: Icons.directions_bus),
     'tram': (label: 'Villamos', icon: Icons.tram),
@@ -285,18 +399,104 @@ class _TransitModesFilterMenu extends ConsumerWidget {
     'boat': (label: 'Hajó', icon: Icons.directions_boat),
   };
 
+  void _showFilterDialog(BuildContext context, WidgetRef ref) {
+    showDialog<void>(
+      context: context,
+      builder: (ctx) {
+        return Consumer(
+          builder: (context, ref, _) {
+            final enabledModes = ref.watch(enabledTransitModesProvider);
+
+            return AlertDialog(
+              backgroundColor: const Color(0xFF0F172A),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(20),
+                side: const BorderSide(color: Colors.white24),
+              ),
+              titlePadding: const EdgeInsets.fromLTRB(20, 16, 12, 8),
+              title: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  const Text(
+                    'Közlekedési módok',
+                    style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold),
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.close, color: Colors.white70),
+                    onPressed: () => Navigator.pop(ctx),
+                  ),
+                ],
+              ),
+              contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+              content: SizedBox(
+                width: 280,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: _modes.entries.map((entry) {
+                    final key = entry.key;
+                    final item = entry.value;
+                    final isChecked = enabledModes.contains(key);
+
+                    return CheckboxListTile(
+                      value: isChecked,
+                      activeColor: const Color(0xFF009EE3),
+                      checkColor: Colors.white,
+                      dense: true,
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 8),
+                      secondary: Icon(item.icon, color: isChecked ? Colors.white : Colors.white38, size: 20),
+                      title: Text(
+                        item.label,
+                        style: TextStyle(
+                          color: isChecked ? Colors.white : Colors.white60,
+                          fontWeight: isChecked ? FontWeight.w600 : FontWeight.normal,
+                          fontSize: 14,
+                        ),
+                      ),
+                      onChanged: (bool? val) {
+                        final updated = Set<String>.from(enabledModes);
+                        if (val == true) {
+                          updated.add(key);
+                        } else {
+                          updated.remove(key);
+                        }
+                        ref.read(enabledTransitModesProvider.notifier).state = updated;
+                      },
+                    );
+                  }).toList(),
+                ),
+              ),
+              actionsPadding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+              actions: [
+                TextButton(
+                  onPressed: () {
+                    ref.read(enabledTransitModesProvider.notifier).state = _modes.keys.toSet();
+                  },
+                  child: const Text('Mind', style: TextStyle(color: Color(0xFF38BDF8))),
+                ),
+                ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF009EE3),
+                    foregroundColor: Colors.white,
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                  ),
+                  onPressed: () => Navigator.pop(ctx),
+                  child: const Text('Kész'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final enabledModes = ref.watch(enabledTransitModesProvider);
 
-    return PopupMenuButton<String>(
-      tooltip: 'Közlekedési módok szűrése',
-      offset: const Offset(0, -290),
-      color: const Color(0xFF0F172A),
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(16),
-        side: const BorderSide(color: Colors.white24, width: 1),
-      ),
+    return InkWell(
+      borderRadius: BorderRadius.circular(14),
+      onTap: () => _showFilterDialog(context, ref),
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
         decoration: BoxDecoration(
@@ -327,65 +527,6 @@ class _TransitModesFilterMenu extends ConsumerWidget {
           ],
         ),
       ),
-      itemBuilder: (context) {
-        return [
-          const PopupMenuItem<String>(
-            enabled: false,
-            child: Text(
-              'Közlekedési módok',
-              style: TextStyle(
-                color: Colors.white70,
-                fontSize: 12,
-                fontWeight: FontWeight.bold,
-              ),
-            ),
-          ),
-          ..._modes.entries.map((entry) {
-            final key = entry.key;
-            final item = entry.value;
-            final isSelected = enabledModes.contains(key);
-
-            return PopupMenuItem<String>(
-              value: key,
-              child: StatefulBuilder(
-                builder: (context, setState) {
-                  return InkWell(
-                    onTap: () {
-                      final updated = Set<String>.from(enabledModes);
-                      if (isSelected) {
-                        updated.remove(key);
-                      } else {
-                        updated.add(key);
-                      }
-                      ref.read(enabledTransitModesProvider.notifier).state = updated;
-                      Navigator.pop(context);
-                    },
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 4),
-                      child: Row(
-                        children: [
-                          Icon(
-                            isSelected ? Icons.check_box : Icons.check_box_outline_blank,
-                            size: 18,
-                            color: isSelected ? const Color(0xFF009EE3) : Colors.white38,
-                          ),
-                          const SizedBox(width: 10),
-                          Icon(item.icon, size: 18, color: Colors.white70),
-                          const SizedBox(width: 8),
-                          Text(
-                            item.label,
-                            style: const TextStyle(color: Colors.white, fontSize: 13),
-                          ),
-                        ],
-                      ),
-                    ),
-                  );
-                },
-              ),
-            );
-          }),
-        ];
-      },
     );
   }
 }
@@ -429,7 +570,9 @@ class _LiveFeedStatusPillState extends ConsumerState<_LiveFeedStatusPill> {
             final features = map['features'] as List<dynamic>? ?? const [];
             for (final f in features) {
               final p = (f as Map<String, dynamic>)['properties'] as Map<String, dynamic>? ?? {};
-              if (p['operator'] == 'MAV') {
+              final op = p['operator'] as String? ?? 'BKK';
+              final vType = p['vehicle_type'] as String? ?? 'bus';
+              if (op == 'MAV' || vType == 'train') {
                 mavCount++;
               } else {
                 bkkCount++;
@@ -498,7 +641,7 @@ class _LiveFeedStatusPillState extends ConsumerState<_LiveFeedStatusPill> {
                         operatorName: 'MÁV-START',
                         count: mavCount,
                         badgeColor: const Color(0xFF0057B8),
-                        status: 'Élő EMMA / GTFS-RT',
+                        status: mavCount > 0 ? 'Élő EMMA / GTFS-RT' : 'Nincs aktív adatfolyam',
                       ),
                     ],
                   ),
@@ -599,8 +742,8 @@ class _DataSourceRow extends StatelessWidget {
   }
 }
 
-Icon _getModeIcon(String mode, {Color? color, double size = 16}) {
-  final icon = switch (mode) {
+IconData _getModeIconData(String mode) {
+  return switch (mode) {
     'tram' => Icons.tram,
     'metro' => Icons.subway,
     'trolley' => Icons.electric_bolt,
@@ -609,5 +752,8 @@ Icon _getModeIcon(String mode, {Color? color, double size = 16}) {
     'boat' => Icons.directions_boat,
     _ => Icons.directions_bus,
   };
-  return Icon(icon, color: color, size: size);
+}
+
+Icon _getModeIcon(String mode, {Color? color, double size = 16}) {
+  return Icon(_getModeIconData(mode), color: color, size: size);
 }

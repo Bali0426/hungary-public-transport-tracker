@@ -110,12 +110,20 @@ mod tests {
     fn test_decode_real_bkk_pb() {
         if let Ok(bytes) = std::fs::read("target/debug/sample_vp.pb") {
             let delays = HashMap::new();
-            let decoded = decode_bkk_vehicle_positions_bytes(&bytes, &delays, None);
+            let repo = crate::static_db::repository::StaticTransitRepository::open("../assets/db/transit_static.db").ok();
+            let decoded = decode_bkk_vehicle_positions_bytes(&bytes, &delays, repo.as_ref());
             match decoded {
                 Ok(vehicles) => {
                     println!("Successfully decoded {} real BKK vehicles!", vehicles.len());
+                    let mut type_counts = HashMap::new();
+                    for v in &vehicles {
+                        *type_counts.entry(v.vehicle_type.clone()).or_insert(0) += 1;
+                    }
+                    println!("Vehicle type counts with static DB: {:?}", type_counts);
+                    for v in vehicles.iter().take(5) {
+                        println!("Sample: line={}, type={}, dest={}", v.line_name, v.vehicle_type, v.destination);
+                    }
                     assert!(!vehicles.is_empty(), "Vehicle list should not be empty");
-                    println!("Sample vehicle: {:?}", vehicles[0]);
                 }
                 Err(e) => {
                     panic!("Failed to decode real BKK protobuf: {:?}", e);

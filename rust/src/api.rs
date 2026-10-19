@@ -83,15 +83,25 @@ pub async fn poll_live_vehicles_in_bbox(
         max_lon,
     };
 
-    let (client, repo, bkk_key, mav_url) = {
+    let (client, repo, bkk_key, mav_url, should_poll, cached_copy) = {
         let guard = ENGINE_STATE.read().unwrap();
+        // Check if cache has vehicles and is younger than 10 seconds
+        let now_sec = chrono::Utc::now().timestamp() as u64;
+        let is_fresh = !guard.cached_vehicles.is_empty() 
+            && guard.cached_vehicles.iter().any(|v| now_sec.saturating_sub(v.timestamp) < 15);
         (
             guard.http_client.clone(),
             guard.repo.clone(),
             guard.bkk_api_key.clone(),
             guard.mav_gtfs_rt_url.clone(),
+            !is_fresh,
+            guard.cached_vehicles.clone(),
         )
     };
+
+    if !should_poll && !cached_copy.is_empty() {
+        return Ok(filter_vehicles_in_bbox(&cached_copy, bbox));
+    }
 
     let bkk_fut = async {
         if let Some(ref key) = bkk_key {
@@ -117,12 +127,19 @@ pub async fn poll_live_vehicles_in_bbox(
         combined_delays.extend(mav_d);
     }
 
+    // If fetch failed or returned nothing, fall back to existing cache
+    if combined_vehicles.is_empty() && !cached_copy.is_empty() {
+        return Ok(filter_vehicles_in_bbox(&cached_copy, bbox));
+    }
+
     let filtered = filter_vehicles_in_bbox(&combined_vehicles, bbox);
 
     {
         let mut guard = ENGINE_STATE.write().unwrap();
-        guard.cached_vehicles = combined_vehicles;
-        guard.cached_trip_delays = combined_delays;
+        if !combined_vehicles.is_empty() {
+            guard.cached_vehicles = combined_vehicles;
+            guard.cached_trip_delays = combined_delays;
+        }
     }
 
     Ok(filtered)
