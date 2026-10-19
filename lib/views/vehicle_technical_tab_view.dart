@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:url_launcher/url_launcher.dart';
 
-import '../models/vehicle_technical_data.dart';
 import '../providers/vehicle_detail_provider.dart';
 
 /// Technical detail view shown in the Vehicle Info Card.
@@ -207,7 +206,7 @@ class _VehicleTechnicalTabViewState
                       child: AnimatedContainer(
                         duration: const Duration(milliseconds: 180),
                         margin: const EdgeInsets.only(right: 8),
-                        width: carriage.isLocomotive ? 110 : 130,
+                        width: carriage.isLocomotive ? 120 : 140,
                         padding: const EdgeInsets.all(6),
                         decoration: BoxDecoration(
                           color: isSelected
@@ -233,12 +232,11 @@ class _VehicleTechnicalTabViewState
                           children: [
                             // Top Row: Coach Number & Class
                             Row(
-                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
                               children: [
                                 if (carriage.coachNumber.isNotEmpty)
                                   Container(
                                     padding: const EdgeInsets.symmetric(
-                                        horizontal: 5, vertical: 2),
+                                        horizontal: 4, vertical: 1.5),
                                     decoration: BoxDecoration(
                                       color: Colors.white24,
                                       borderRadius: BorderRadius.circular(4),
@@ -248,16 +246,18 @@ class _VehicleTechnicalTabViewState
                                       style: const TextStyle(
                                         color: Colors.white,
                                         fontWeight: FontWeight.bold,
-                                        fontSize: 10,
+                                        fontSize: 9.5,
                                       ),
                                     ),
                                   )
                                 else
                                   const Icon(Icons.flash_on,
                                       size: 13, color: Colors.amber),
+                                const Spacer(),
                                 Container(
+                                  constraints: const BoxConstraints(maxWidth: 78),
                                   padding: const EdgeInsets.symmetric(
-                                      horizontal: 4, vertical: 2),
+                                      horizontal: 4, vertical: 1.5),
                                   decoration: BoxDecoration(
                                     color: _getClassColor(carriage.className)
                                         .withValues(alpha: 0.25),
@@ -268,8 +268,10 @@ class _VehicleTechnicalTabViewState
                                     style: TextStyle(
                                       color: _getClassColor(carriage.className),
                                       fontWeight: FontWeight.bold,
-                                      fontSize: 9,
+                                      fontSize: 8.5,
                                     ),
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
                                   ),
                                 ),
                               ],
@@ -462,18 +464,21 @@ class _VehicleTechnicalTabViewState
               const SizedBox(height: 10),
 
               // Source & Web Link
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              Wrap(
+                alignment: WrapAlignment.spaceBetween,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                spacing: 8,
+                runSpacing: 4,
                 children: [
                   const Text(
-                    'Forrás: vagonWEB.cz (${2026})',
+                    'Forrás: vagonWEB.cz',
                     style: TextStyle(color: Colors.white38, fontSize: 10),
                   ),
                   InkWell(
                     onTap: () => _openUrl(comp.vagonwebUrl),
                     borderRadius: BorderRadius.circular(4),
                     child: const Padding(
-                      padding: EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                      padding: EdgeInsets.symmetric(horizontal: 4, vertical: 2),
                       child: Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
@@ -649,8 +654,11 @@ class _VehicleTechnicalTabViewState
           const SizedBox(height: 10),
 
           // Source and HBweb link
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          Wrap(
+            alignment: WrapAlignment.spaceBetween,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            spacing: 8,
+            runSpacing: 4,
             children: [
               const Text(
                 'Forrás: HBweb.hu járműállomány',
@@ -660,7 +668,7 @@ class _VehicleTechnicalTabViewState
                 onTap: () => _openUrl(info.hbwebUrl),
                 borderRadius: BorderRadius.circular(4),
                 child: const Padding(
-                  padding: EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                  padding: EdgeInsets.symmetric(horizontal: 4, vertical: 2),
                   child: Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [

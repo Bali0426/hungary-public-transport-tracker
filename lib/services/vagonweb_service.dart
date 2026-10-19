@@ -19,19 +19,29 @@ class VagonwebService {
 
   /// Extracts the train number from lineName, tripId, or destination.
   String? extractTrainNumber(String lineName, String? tripId, String? dest) {
-    // 1. Check for standalone numbers (2 to 5 digits) in lineName
-    final lineNumMatch = RegExp(r'\b(\d{2,5})\b').firstMatch(lineName);
+    // 1. If tripId has a 3-5 digit train number, that is the most authoritative real-time train number
+    if (tripId != null && tripId.isNotEmpty) {
+      final tripClean = tripId.replaceFirst('MAV:', '');
+      final tripMatch =
+          RegExp(r'(?:^|[^0-9])(\d{3,5})(?:[^0-9]|$)').firstMatch(tripClean);
+      if (tripMatch != null) {
+        return tripMatch.group(1);
+      }
+    }
+
+    // 2. Check for route prefix followed by space and number, e.g. "Z50 2834" or "IC 562"
+    final spacedMatch = RegExp(r'[A-Za-z0-9]+[\s-](\d{2,5})').firstMatch(lineName);
+    if (spacedMatch != null) {
+      return spacedMatch.group(1);
+    }
+
+    // 3. Check for standalone numbers (3 to 5 digits) in lineName
+    final lineNumMatch = RegExp(r'\b(\d{3,5})\b').firstMatch(lineName);
     if (lineNumMatch != null) {
       return lineNumMatch.group(1);
     }
 
-    // 2. Check for route prefix followed by number, e.g. "Z50 2834" or "S50 2814"
-    final routeMatch = RegExp(r'[A-Za-z]+[\s-]?(\d{2,5})').firstMatch(lineName);
-    if (routeMatch != null) {
-      return routeMatch.group(1);
-    }
-
-    // 3. Check inside tripId e.g. "MAV:562_123" or "MAV:2834"
+    // 4. Check inside tripId for any 2-5 digits
     if (tripId != null && tripId.isNotEmpty) {
       final tripClean = tripId.replaceFirst('MAV:', '');
       final tripMatch = RegExp(r'\b(\d{2,5})\b').firstMatch(tripClean);
@@ -40,7 +50,7 @@ class VagonwebService {
       }
     }
 
-    // 4. Check destination text e.g. "(562. sz. vonat)"
+    // 5. Check destination text e.g. "(562. sz. vonat)"
     if (dest != null && dest.isNotEmpty) {
       final destMatch = RegExp(r'\((\d{2,5})\.').firstMatch(dest);
       if (destMatch != null) {
@@ -48,13 +58,22 @@ class VagonwebService {
       }
     }
 
+    // 6. Fallback to 2-5 digits in lineName (e.g. 50 in S50)
+    final anyNum = RegExp(r'(\d{2,5})').firstMatch(lineName);
+    if (anyNum != null) {
+      return anyNum.group(1);
+    }
+
     return null;
   }
 
   /// Extracts the train name (e.g. "Tokaj", "Nyírség", "Balaton", "Z50")
   String extractTrainName(String lineName) {
-    final cleaned = lineName
-        .replaceAll(RegExp(r'\b(IC|EC|EN|IR|ER|RJ|RJX|Sz|S|G|Z)\b', caseSensitive: false), '')
+    var cleaned = lineName
+        .replaceFirst(
+          RegExp(r'^(IC|EC|EN|IR|ER|RJ|RJX|Sz|S|G|Z)\s*', caseSensitive: false),
+          '',
+        )
         .replaceAll(RegExp(r'\b\d{2,5}\b'), '')
         .trim();
     if (cleaned.isNotEmpty) {
@@ -349,7 +368,6 @@ class VagonwebService {
     String? destination,
   ) {
     final lower = lineName.toLowerCase();
-    final destLower = (destination ?? '').toLowerCase();
 
     // 1. Stadler KISS Double-Decker EMU (Z50, S50, S70, G70, etc.)
     if (lower.startsWith('z') ||

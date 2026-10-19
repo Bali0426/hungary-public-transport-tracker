@@ -1,5 +1,5 @@
-/// Models for detailed technical rolling stock data and train compositions
-/// sourced from vagonWEB (for MÁV trains) and HBweb (for BKK vehicles).
+// Models for detailed technical rolling stock data and train compositions
+// sourced from vagonWEB (for MÁV trains) and HBweb (for BKK vehicles).
 
 /// A single rail car or locomotive in a MÁV train composition (vagonWEB).
 class CarriageInfo {
