@@ -1,0 +1,15 @@
+# Build outputs
+/build/
+/rust/target/
+/.dart_tool/
+/.cache/
+
+# Generated / large GTFS archives & SQLite DB
+*.zip
+assets/db/transit_static.db
+
+# Environment & IDE
+.env
+.vscode/
+.idea/
+*.iml

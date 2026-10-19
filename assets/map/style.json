@@ -1,0 +1,90 @@
+{
+  "version": 8,
+  "name": "Hungary Transit Vector Style",
+  "sources": {
+    "openmaptiles": {
+      "type": "vector",
+      "url": "https://tiles.openfreemap.org/planet"
+    }
+  },
+  "sprite": "https://tiles.openfreemap.org/sprites/ofm_f384/ofm",
+  "glyphs": "https://tiles.openfreemap.org/fonts/{fontstack}/{range}.pbf",
+  "layers": [
+    {
+      "id": "background",
+      "type": "background",
+      "paint": {
+        "background-color": "#0F172A"
+      }
+    },
+    {
+      "id": "water",
+      "type": "fill",
+      "source": "openmaptiles",
+      "source-layer": "water",
+      "paint": {
+        "fill-color": "#1E293B"
+      }
+    },
+    {
+      "id": "landuse-park",
+      "type": "fill",
+      "source": "openmaptiles",
+      "source-layer": "park",
+      "paint": {
+        "fill-color": "#11221F",
+        "fill-opacity": 0.6
+      }
+    },
+    {
+      "id": "roads-minor",
+      "type": "line",
+      "source": "openmaptiles",
+      "source-layer": "transportation",
+      "filter": ["all", ["!in", "class", "motorway", "trunk", "primary", "rail", "transit"]],
+      "paint": {
+        "line-color": "#1E293B",
+        "line-width": 1.0
+      }
+    },
+    {
+      "id": "roads-major",
+      "type": "line",
+      "source": "openmaptiles",
+      "source-layer": "transportation",
+      "filter": ["in", "class", "motorway", "trunk", "primary"],
+      "paint": {
+        "line-color": "#334155",
+        "line-width": 2.0
+      }
+    },
+    {
+      "id": "railways",
+      "type": "line",
+      "source": "openmaptiles",
+      "source-layer": "transportation",
+      "filter": ["in", "class", "rail", "transit"],
+      "paint": {
+        "line-color": "#475569",
+        "line-width": 1.5,
+        "line-dasharray": [2, 2]
+      }
+    },
+    {
+      "id": "place-labels",
+      "type": "symbol",
+      "source": "openmaptiles",
+      "source-layer": "place",
+      "layout": {
+        "text-field": ["coalesce", ["get", "name:hu"], ["get", "name"]],
+        "text-font": ["Noto Sans Regular"],
+        "text-size": 12
+      },
+      "paint": {
+        "text-color": "#94A3B8",
+        "text-halo-color": "#0F172A",
+        "text-halo-width": 1.5
+      }
+    }
+  ]
+}
