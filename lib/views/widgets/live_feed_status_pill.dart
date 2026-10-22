@@ -16,112 +16,93 @@ class LiveFeedStatusPill extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final feedAsync = ref.watch(liveVehiclesGeoJsonProvider);
     final counts = ref.watch(liveVehicleCountsProvider);
+    final renderedCount = ref.watch(renderedVehiclesCountProvider);
+    final theme = Theme.of(context);
 
-    return Container(
-      decoration: BoxDecoration(
-        color: const Color(0xF20F172A),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: Colors.white24),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.5),
-            blurRadius: 10,
-            offset: const Offset(0, 3),
-          ),
-        ],
-      ),
+    return Card(
+      elevation: 4,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+      color: theme.colorScheme.surfaceContainerHigh,
+      margin: EdgeInsets.zero,
+      clipBehavior: Clip.antiAlias,
       child: feedAsync.when(
         data: (_) {
           return InkWell(
-            borderRadius: BorderRadius.circular(16),
             onTap: onToggleDirectory,
             child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   const Icon(Icons.circle, size: 9, color: Color(0xFF22C55E)),
                   const SizedBox(width: 8),
                   Text(
-                    '${counts.total} aktív jármű (BKK: ${counts.bkk} | MÁV: ${counts.mav})',
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 12,
+                    '$renderedCount megjelenítve / ${counts.total} aktív (BKK: ${counts.bkk} | MÁV: ${counts.mav})',
+                    style: theme.textTheme.labelMedium?.copyWith(
                       fontWeight: FontWeight.w700,
                     ),
                   ),
-                  const SizedBox(width: 8),
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFF1E293B),
-                      borderRadius: BorderRadius.circular(6),
-                      border: Border.all(color: Colors.white24),
+                  const SizedBox(width: 10),
+                  FilledButton.tonalIcon(
+                    onPressed: onToggleDirectory,
+                    style: FilledButton.styleFrom(
+                      visualDensity: VisualDensity.compact,
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                      minimumSize: Size.zero,
+                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                     ),
-                    child: const Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Text(
-                          'API & Források',
-                          style: TextStyle(
-                            color: Color(0xFF38BDF8),
-                            fontSize: 11,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                        SizedBox(width: 4),
-                        Icon(Icons.tune, size: 12, color: Color(0xFF38BDF8)),
-                      ],
-                    ),
+                    icon: const Icon(Icons.tune, size: 13),
+                    label: const Text('API & Források', style: TextStyle(fontSize: 11)),
                   ),
                 ],
               ),
             ),
           );
         },
-        loading: () => const Padding(
-          padding: EdgeInsets.symmetric(horizontal: 14, vertical: 9),
+        loading: () => Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              SizedBox(
-                width: 12,
-                height: 12,
+              const SizedBox(
+                width: 14,
+                height: 14,
                 child: CircularProgressIndicator(strokeWidth: 2),
               ),
-              SizedBox(width: 8),
+              const SizedBox(width: 10),
               Text(
                 'BKK & MÁV járművek lekérése...',
-                style: TextStyle(color: Colors.white70, fontSize: 12),
+                style: theme.textTheme.labelMedium,
               ),
             ],
           ),
         ),
         error: (err, _) => InkWell(
-          borderRadius: BorderRadius.circular(16),
           onTap: onToggleDirectory,
           child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                const Icon(Icons.warning_amber, size: 14, color: Colors.amber),
-                const SizedBox(width: 6),
-                const Text(
+                Icon(Icons.warning_amber_rounded, size: 16, color: theme.colorScheme.error),
+                const SizedBox(width: 8),
+                Text(
                   'API kapcsolat ellenőrzése',
-                  style: TextStyle(color: Colors.amber, fontSize: 12),
+                  style: theme.textTheme.labelMedium?.copyWith(
+                    color: theme.colorScheme.error,
+                    fontWeight: FontWeight.w600,
+                  ),
                 ),
                 const SizedBox(width: 8),
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                  decoration: BoxDecoration(
-                    color: Colors.amber.withValues(alpha: 0.2),
-                    borderRadius: BorderRadius.circular(4),
+                FilledButton.tonal(
+                  onPressed: onToggleDirectory,
+                  style: FilledButton.styleFrom(
+                    visualDensity: VisualDensity.compact,
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                    minimumSize: Size.zero,
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                   ),
-                  child: const Text(
-                    'Beállítás',
-                    style: TextStyle(color: Colors.amber, fontSize: 10, fontWeight: FontWeight.bold),
-                  ),
+                  child: const Text('Beállítás', style: TextStyle(fontSize: 11)),
                 ),
               ],
             ),

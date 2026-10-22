@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../providers/api_config_provider.dart';
 import '../../providers/live_vehicles_provider.dart';
+import '../../utils/transit_display_utils.dart';
 
 /// Comprehensive interactive API Directory and In-App Key Configuration Card.
 /// Explains precisely which API provides which map elements, and allows in-app key updates.
@@ -43,45 +44,37 @@ class _DataSourcesDirectoryCardState
   Widget build(BuildContext context) {
     final config = ref.watch(apiConfigProvider);
     final counts = ref.watch(liveVehicleCountsProvider);
+    final theme = Theme.of(context);
 
-    return Container(
-      decoration: BoxDecoration(
-        color: const Color(0xF70F172A),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: Colors.white24, width: 1.2),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.65),
-            blurRadius: 18,
-            offset: const Offset(0, 6),
-          ),
-        ],
-      ),
+    return Card(
+      elevation: 6,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+      color: theme.colorScheme.surfaceContainer,
+      margin: EdgeInsets.zero,
+      clipBehavior: Clip.antiAlias,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           // Header
           Padding(
-            padding: const EdgeInsets.fromLTRB(16, 14, 10, 12),
+            padding: const EdgeInsets.fromLTRB(18, 14, 10, 12),
             child: Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                const Row(
+                Row(
                   children: [
-                    Icon(Icons.alt_route, color: Color(0xFF38BDF8), size: 18),
-                    SizedBox(width: 8),
+                    Icon(Icons.alt_route, color: theme.colorScheme.primary, size: 20),
+                    const SizedBox(width: 10),
                     Text(
                       'API-k és Térképi Elemek Forrásai',
-                      style: TextStyle(
-                        color: Colors.white,
-                        fontSize: 14,
+                      style: theme.textTheme.titleMedium?.copyWith(
                         fontWeight: FontWeight.bold,
                       ),
                     ),
                   ],
                 ),
                 IconButton(
-                  icon: const Icon(Icons.close, size: 18, color: Colors.white60),
+                  icon: const Icon(Icons.close, size: 20),
                   onPressed: widget.onClose,
                   padding: EdgeInsets.zero,
                   constraints: const BoxConstraints(),
@@ -89,7 +82,7 @@ class _DataSourcesDirectoryCardState
               ],
             ),
           ),
-          const Divider(height: 1, color: Colors.white12),
+          const Divider(height: 1),
 
           // Content body
           Expanded(
@@ -98,8 +91,11 @@ class _DataSourcesDirectoryCardState
               children: [
                 // 1. BKK FUTÁR GTFS-RT API
                 _buildApiCard(
+                  theme: theme,
                   title: 'BKK FUTÁR GTFS-RT API',
-                  badgeColor: const Color(0xFF009EE3),
+                  badgeColor: getModeBadgeColor('bus'),
+                  badgeTextColor: getModeForegroundColor('bus'),
+                  modeIcon: 'bus',
                   statusText: counts.bkk > 0
                       ? 'ÉLŐ CSATLAKOZÁS (${counts.bkk} jármű)'
                       : 'CSATLAKOZÁS...',
@@ -123,10 +119,9 @@ class _DataSourcesDirectoryCardState
                           Expanded(
                             child: Text(
                               'Aktív kulcs: ${_maskKey(config.bkkApiKey)}',
-                              style: const TextStyle(
-                                color: Colors.white70,
-                                fontSize: 11,
+                              style: theme.textTheme.bodySmall?.copyWith(
                                 fontFamily: 'monospace',
+                                color: theme.colorScheme.onSurfaceVariant,
                               ),
                               overflow: TextOverflow.ellipsis,
                             ),
@@ -138,13 +133,11 @@ class _DataSourcesDirectoryCardState
                             ),
                             icon: Icon(
                               _editingBkk ? Icons.close : Icons.key,
-                              size: 13,
-                              color: const Color(0xFF38BDF8),
+                              size: 14,
                             ),
                             label: Text(
                               _editingBkk ? 'Mégse' : 'Kulcs megadása',
-                              style: const TextStyle(
-                                  color: Color(0xFF38BDF8), fontSize: 11),
+                              style: const TextStyle(fontSize: 11),
                             ),
                             onPressed: () {
                               setState(() {
@@ -165,33 +158,28 @@ class _DataSourcesDirectoryCardState
                               Expanded(
                                 child: TextField(
                                   controller: _bkkController,
-                                  style: const TextStyle(
-                                      color: Colors.white, fontSize: 11),
+                                  style: const TextStyle(fontSize: 12),
                                   decoration: InputDecoration(
                                     hintText: 'BKK FUTÁR API kulcs beillesztése...',
-                                    hintStyle: const TextStyle(
-                                        color: Colors.white38, fontSize: 11),
+                                    hintStyle: TextStyle(
+                                      color: theme.colorScheme.onSurfaceVariant.withValues(alpha: 0.6),
+                                      fontSize: 12,
+                                    ),
                                     isDense: true,
                                     contentPadding: const EdgeInsets.symmetric(
                                         horizontal: 10, vertical: 8),
-                                    filled: true,
-                                    fillColor: const Color(0xFF0F172A),
                                     border: OutlineInputBorder(
-                                      borderRadius: BorderRadius.circular(6),
-                                      borderSide:
-                                          const BorderSide(color: Colors.white24),
+                                      borderRadius: BorderRadius.circular(8),
                                     ),
                                   ),
                                 ),
                               ),
                               const SizedBox(width: 8),
-                              ElevatedButton(
-                                style: ElevatedButton.styleFrom(
-                                  backgroundColor: const Color(0xFF009EE3),
-                                  foregroundColor: Colors.white,
+                              FilledButton(
+                                style: FilledButton.styleFrom(
                                   visualDensity: VisualDensity.compact,
                                   padding: const EdgeInsets.symmetric(
-                                      horizontal: 10, vertical: 8),
+                                      horizontal: 12, vertical: 8),
                                 ),
                                 onPressed: () {
                                   ref
@@ -200,7 +188,7 @@ class _DataSourcesDirectoryCardState
                                   setState(() => _editingBkk = false);
                                 },
                                 child: const Text('Mentés',
-                                    style: TextStyle(fontSize: 11)),
+                                    style: TextStyle(fontSize: 11.5)),
                               ),
                             ],
                           ),
@@ -213,14 +201,17 @@ class _DataSourcesDirectoryCardState
 
                 // 2. MÁV-START & GYSEV GTFS-RT API
                 _buildApiCard(
+                  theme: theme,
                   title: 'MÁV-START & GYSEV GTFS-RT API',
-                  badgeColor: const Color(0xFF0057B8),
+                  badgeColor: getModeBadgeColor('train'),
+                  badgeTextColor: getModeForegroundColor('train'),
+                  modeIcon: 'train',
                   statusText: counts.mav > 0
                       ? 'ÉLŐ CSATLAKOZÁS (${counts.mav} vonat)'
                       : 'KÉSZENLÉTBEN',
                   statusColor: counts.mav > 0
                       ? const Color(0xFF0284C7)
-                      : Colors.white54,
+                      : theme.colorScheme.onSurfaceVariant,
                   elements: [
                     'Országos vasúti személyszállító vonatok (${counts.train} db)',
                     'InterCity, EuroCity, Railjet és gyorsvonat GPS pozíciók',
@@ -237,8 +228,9 @@ class _DataSourcesDirectoryCardState
                               config.mavGtfsRtUrl.isNotEmpty
                                   ? 'Egyéni végpont: ${config.mavGtfsRtUrl}'
                                   : 'Alapértelmezett: MÁV-START EMMA / NAP portál',
-                              style: const TextStyle(
-                                  color: Colors.white70, fontSize: 11),
+                              style: theme.textTheme.bodySmall?.copyWith(
+                                color: theme.colorScheme.onSurfaceVariant,
+                              ),
                               overflow: TextOverflow.ellipsis,
                             ),
                           ),
@@ -249,13 +241,11 @@ class _DataSourcesDirectoryCardState
                             ),
                             icon: Icon(
                               _editingMav ? Icons.close : Icons.link,
-                              size: 13,
-                              color: const Color(0xFF38BDF8),
+                              size: 14,
                             ),
                             label: Text(
                               _editingMav ? 'Mégse' : 'URL módosítása',
-                              style: const TextStyle(
-                                  color: Color(0xFF38BDF8), fontSize: 11),
+                              style: const TextStyle(fontSize: 11),
                             ),
                             onPressed: () {
                               setState(() {
@@ -276,34 +266,29 @@ class _DataSourcesDirectoryCardState
                               Expanded(
                                 child: TextField(
                                   controller: _mavController,
-                                  style: const TextStyle(
-                                      color: Colors.white, fontSize: 11),
+                                  style: const TextStyle(fontSize: 12),
                                   decoration: InputDecoration(
                                     hintText:
                                         'https://nap.kozut.hu/.../gtfs-rt/feed',
-                                    hintStyle: const TextStyle(
-                                        color: Colors.white38, fontSize: 11),
+                                    hintStyle: TextStyle(
+                                      color: theme.colorScheme.onSurfaceVariant.withValues(alpha: 0.6),
+                                      fontSize: 12,
+                                    ),
                                     isDense: true,
                                     contentPadding: const EdgeInsets.symmetric(
                                         horizontal: 10, vertical: 8),
-                                    filled: true,
-                                    fillColor: const Color(0xFF0F172A),
                                     border: OutlineInputBorder(
-                                      borderRadius: BorderRadius.circular(6),
-                                      borderSide:
-                                          const BorderSide(color: Colors.white24),
+                                      borderRadius: BorderRadius.circular(8),
                                     ),
                                   ),
                                 ),
                               ),
                               const SizedBox(width: 8),
-                              ElevatedButton(
-                                style: ElevatedButton.styleFrom(
-                                  backgroundColor: const Color(0xFF0057B8),
-                                  foregroundColor: Colors.white,
+                              FilledButton(
+                                style: FilledButton.styleFrom(
                                   visualDensity: VisualDensity.compact,
                                   padding: const EdgeInsets.symmetric(
-                                      horizontal: 10, vertical: 8),
+                                      horizontal: 12, vertical: 8),
                                 ),
                                 onPressed: () {
                                   ref
@@ -312,7 +297,7 @@ class _DataSourcesDirectoryCardState
                                   setState(() => _editingMav = false);
                                 },
                                 child: const Text('Mentés',
-                                    style: TextStyle(fontSize: 11)),
+                                    style: TextStyle(fontSize: 11.5)),
                               ),
                             ],
                           ),
@@ -325,8 +310,9 @@ class _DataSourcesDirectoryCardState
 
                 // 3. Statikus Helyi SQLite Adatbázis (R-Tree)
                 _buildApiCard(
+                  theme: theme,
                   title: 'BKK + MÁV Statikus Menetrendi DB',
-                  badgeColor: const Color(0xFF818CF8),
+                  badgeColor: const Color(0xFF6366F1),
                   statusText: 'OFFLINE MOTOR AKTÍV',
                   statusColor: const Color(0xFF22C55E),
                   elements: [
@@ -342,6 +328,7 @@ class _DataSourcesDirectoryCardState
 
                 // 4. HBweb és vagonWEB
                 _buildApiCard(
+                  theme: theme,
                   title: 'HBweb.hu & vagonWEB.cz Rendszerek',
                   badgeColor: const Color(0xFFD97706),
                   statusText: 'INTEGRÁLVA',
@@ -357,10 +344,11 @@ class _DataSourcesDirectoryCardState
 
                 // 5. OpenStreetMap
                 _buildApiCard(
+                  theme: theme,
                   title: 'OpenStreetMap Kartográfia',
                   badgeColor: const Color(0xFF475569),
                   statusText: 'TÉRKÉP ALAPRÉTEG',
-                  statusColor: Colors.white70,
+                  statusColor: theme.colorScheme.onSurfaceVariant,
                   elements: [
                     'Standard és sötétített vektor csempék',
                     'Országos vasútvonalak, utcahálózat és közigazgatási határok',
@@ -380,100 +368,143 @@ class _DataSourcesDirectoryCardState
   }
 
   Widget _buildApiCard({
+    required ThemeData theme,
     required String title,
     required Color badgeColor,
+    Color badgeTextColor = Colors.white,
+    String? modeIcon,
     required String statusText,
     required Color statusColor,
     required List<String> elements,
     Widget? configSection,
   }) {
-    return Container(
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: const Color(0xFF1E293B),
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: Colors.white12),
+    return Card(
+      elevation: 0,
+      color: theme.colorScheme.surfaceContainerHigh,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(14),
+        side: BorderSide(
+          color: theme.colorScheme.outlineVariant.withValues(alpha: 0.5),
+        ),
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Flexible(
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Flexible(
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3.5),
+                    decoration: BoxDecoration(
+                      color: badgeColor,
+                      borderRadius: BorderRadius.circular(6),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        if (modeIcon != null) ...[
+                          TransitModeCircleIcon(mode: modeIcon, size: 14),
+                          const SizedBox(width: 5),
+                        ],
+                        Flexible(
+                          child: Text(
+                            title,
+                            style: TextStyle(
+                              color: badgeTextColor,
+                              fontSize: 11,
+                              fontWeight: FontWeight.bold,
+                            ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2.5),
                   decoration: BoxDecoration(
-                    color: badgeColor,
-                    borderRadius: BorderRadius.circular(5),
+                    color: statusColor.withValues(alpha: 0.15),
+                    border: Border.all(color: statusColor.withValues(alpha: 0.6), width: 1),
+                    borderRadius: BorderRadius.circular(6),
                   ),
                   child: Text(
-                    title,
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 11,
+                    statusText,
+                    style: TextStyle(
+                      color: statusColor,
+                      fontSize: 9.5,
                       fontWeight: FontWeight.bold,
                     ),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
                   ),
                 ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'Térképen megjelenített elemek:',
+              style: TextStyle(
+                color: theme.colorScheme.primary,
+                fontSize: 10.5,
+                fontWeight: FontWeight.bold,
               ),
-              const SizedBox(width: 8),
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                decoration: BoxDecoration(
-                  color: statusColor.withValues(alpha: 0.15),
-                  border: Border.all(color: statusColor, width: 1),
-                  borderRadius: BorderRadius.circular(4),
-                ),
-                child: Text(
-                  statusText,
-                  style: TextStyle(
-                    color: statusColor,
-                    fontSize: 9.5,
-                    fontWeight: FontWeight.bold,
+            ),
+            const SizedBox(height: 4),
+            ...elements.map(
+              (e) {
+                String? itemMode;
+                final lower = e.toLowerCase();
+                if (lower.contains('buszok') || lower.contains('bkk járatok')) {
+                  itemMode = 'bus';
+                } else if (lower.contains('villamosok')) {
+                  itemMode = 'tram';
+                } else if (lower.contains('trolibuszok')) {
+                  itemMode = 'trolley';
+                } else if (lower.contains('metrók')) {
+                  itemMode = 'metro';
+                } else if (lower.contains('hév')) {
+                  itemMode = 'suburban_rail';
+                } else if (lower.contains('átkelőhajók') || lower.contains('hajó')) {
+                  itemMode = 'boat';
+                } else if (lower.contains('vonatok') || lower.contains('vonat')) {
+                  itemMode = 'train';
+                }
+
+                return Padding(
+                  padding: const EdgeInsets.only(bottom: 2),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      if (itemMode != null) ...[
+                        TransitModeCircleIcon(mode: itemMode, size: 12),
+                        const SizedBox(width: 5),
+                      ] else ...[
+                        Text(' • ',
+                            style: TextStyle(color: theme.colorScheme.onSurfaceVariant.withValues(alpha: 0.6), fontSize: 11)),
+                      ],
+                      Expanded(
+                        child: Text(
+                          e,
+                          style: theme.textTheme.bodySmall?.copyWith(fontSize: 11),
+                        ),
+                      ),
+                    ],
                   ),
-                ),
+                );
+              },
+            ),
+            if (configSection != null) ...[
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 6),
+                child: Divider(height: 1),
               ),
+              configSection,
             ],
-          ),
-          const SizedBox(height: 8),
-          const Text(
-            'Térképen megjelenített elemek:',
-            style: TextStyle(
-              color: Color(0xFF38BDF8),
-              fontSize: 10.5,
-              fontWeight: FontWeight.bold,
-            ),
-          ),
-          const SizedBox(height: 4),
-          ...elements.map(
-            (e) => Padding(
-              padding: const EdgeInsets.only(bottom: 2),
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text(' • ',
-                      style: TextStyle(color: Colors.white38, fontSize: 11)),
-                  Expanded(
-                    child: Text(
-                      e,
-                      style:
-                          const TextStyle(color: Colors.white70, fontSize: 11),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-          if (configSection != null) ...[
-            const Padding(
-              padding: EdgeInsets.symmetric(vertical: 6),
-              child: Divider(height: 1, color: Colors.white12),
-            ),
-            configSection,
           ],
-        ],
+        ),
       ),
     );
   }

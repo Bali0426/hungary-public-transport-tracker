@@ -98,4 +98,12 @@ pub struct UnifiedDeparture {
     pub estimated_time_formatted: String,
     pub is_realtime: bool,
     pub platform_code: Option<String>,
+    #[serde(default)]
+    pub is_arrival: bool,
+    #[serde(default)]
+    pub origin_station: Option<String>,
+    #[serde(default)]
+    pub scheduled_arrival_time_formatted: Option<String>,
+    #[serde(default)]
+    pub estimated_arrival_time_formatted: Option<String>,
 }

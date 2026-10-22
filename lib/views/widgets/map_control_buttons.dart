@@ -3,39 +3,68 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../providers/live_vehicles_provider.dart';
 
-/// Floating toggle button to cycle stops/platform layers on the map.
-class StopsLayerToggleButton extends ConsumerWidget {
-  final VoidCallback? onToggle;
+/// Floating Action Button to center map to user's current GPS location or default Budapest center.
+class MyLocationButton extends StatelessWidget {
+  final VoidCallback? onLocationRequested;
+  final void Function(double lat, double lon)? onMoveToLocation;
 
-  const StopsLayerToggleButton({super.key, this.onToggle});
+  const MyLocationButton({
+    super.key,
+    this.onLocationRequested,
+    this.onMoveToLocation,
+  });
+
+  static const double defaultLat = 47.4979; // Central Budapest
+  static const double defaultLon = 19.0402;
+
+  void _handleLocation(BuildContext context) {
+    if (onMoveToLocation != null) {
+      onMoveToLocation!(defaultLat, defaultLon);
+    } else {
+      onLocationRequested?.call();
+    }
+
+    ScaffoldMessenger.of(context).clearSnackBars();
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Ugrás a jelenlegi pozícióra (Budapest)'),
+        duration: Duration(seconds: 2),
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
+  }
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final showGroups = ref.watch(showStopGroupsProvider);
-    final showPlatforms = ref.watch(showPlatformsProvider);
-    final anyActive = showGroups || showPlatforms;
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
 
     return FloatingActionButton.small(
-      heroTag: 'stops_toggle_fab',
-      tooltip: anyActive
-          ? (showGroups && showPlatforms
-              ? 'Megállók kikapcsolása'
-              : 'Peronok bekapcsolása')
-          : 'Megállók bekapcsolása (OSM)',
-      backgroundColor: anyActive ? const Color(0xFF818CF8) : const Color(0xE60F172A),
-      foregroundColor: Colors.white,
-      onPressed: () {
-        if (!showGroups && !showPlatforms) {
-          ref.read(showStopGroupsProvider.notifier).state = true;
-        } else if (showGroups && !showPlatforms) {
-          ref.read(showPlatformsProvider.notifier).state = true;
-        } else {
-          ref.read(showStopGroupsProvider.notifier).state = false;
-          ref.read(showPlatformsProvider.notifier).state = false;
-        }
-        onToggle?.call();
-      },
-      child: Icon(anyActive ? Icons.place : Icons.place_outlined, size: 20),
+      heroTag: 'my_location_fab',
+      tooltip: 'Jelenlegi pozíció (GPS)',
+      backgroundColor: theme.colorScheme.surfaceContainerHigh,
+      foregroundColor: theme.colorScheme.primary,
+      onPressed: () => _handleLocation(context),
+      child: const Icon(Icons.my_location, size: 20),
+    );
+  }
+}
+
+/// Floating toggle button legacy alias/wrapper converted to GPS location button.
+class StopsLayerToggleButton extends StatelessWidget {
+  final VoidCallback? onToggle;
+  final void Function(double lat, double lon)? onMoveToLocation;
+
+  const StopsLayerToggleButton({
+    super.key,
+    this.onToggle,
+    this.onMoveToLocation,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return MyLocationButton(
+      onLocationRequested: onToggle,
+      onMoveToLocation: onMoveToLocation,
     );
   }
 }
@@ -47,12 +76,13 @@ class DarkModeToggleButton extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final isDark = ref.watch(mapDarkModeProvider);
+    final theme = Theme.of(context);
 
     return FloatingActionButton.small(
       heroTag: 'dark_mode_toggle',
       tooltip: isDark ? 'Világos mód' : 'Sötét térkép mód',
-      backgroundColor: const Color(0xE60F172A),
-      foregroundColor: isDark ? const Color(0xFFEAB308) : Colors.white70,
+      backgroundColor: theme.colorScheme.surfaceContainerHigh,
+      foregroundColor: isDark ? Colors.amber : theme.colorScheme.onSurfaceVariant,
       onPressed: () {
         ref.read(mapDarkModeProvider.notifier).state = !isDark;
       },

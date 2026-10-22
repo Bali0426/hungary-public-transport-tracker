@@ -7,6 +7,7 @@ import 'package:hungary_public_transport_tracker/providers/vehicle_detail_provid
 import 'package:hungary_public_transport_tracker/services/hbweb_service.dart';
 import 'package:hungary_public_transport_tracker/services/vagonweb_service.dart';
 import 'package:hungary_public_transport_tracker/views/vehicle_technical_tab_view.dart';
+import 'package:hungary_public_transport_tracker/views/widgets/station_detail_card.dart';
 
 void main() {
   group('VagonwebService Tests', () {
@@ -18,6 +19,84 @@ void main() {
       expect(vagonweb.extractTrainNumber('Z50 2834', null, null), equals('2834'));
       expect(vagonweb.extractTrainNumber('S50', 'MAV:2814_100', null), equals('2814'));
       expect(vagonweb.extractTrainNumber('MÁV', null, 'Debrecen (582. sz. vonat)'), equals('582'));
+    });
+
+    test('extractTrainNumber prioritizes tripShortName over internal OTP tripId', () {
+      final num = vagonweb.extractTrainNumber(
+        'TÓPART IC',
+        'MAV:1:36362214',
+        null,
+        '856 TÓPART InterCity',
+      );
+      expect(num, equals('856'));
+      expect(num, isNot(equals('562')));
+
+      expect(
+        vagonweb.extractTrainNumber('IC', null, null, 'IC 856'),
+        equals('856'),
+      );
+      expect(
+        vagonweb.extractTrainNumber('Személy', null, null, '34123 személyvonat'),
+        equals('34123'),
+      );
+    });
+
+    test('getTrainComposition resolves 856 Tópart IC with tripShortName and does not fallback to 562', () async {
+      final comp = await vagonweb.getTrainComposition(
+        lineName: 'TÓPART IC',
+        tripId: 'MAV:1:36362214',
+        tripShortName: '856 TÓPART InterCity',
+      );
+
+      expect(comp, isNotNull);
+      expect(comp!.trainNumber, equals('856'));
+      expect(comp.trainNumber, isNot(equals('562')));
+      expect(comp.vagonwebUrl, contains('cislo=856'));
+      expect(comp.category, equals('IC'));
+    });
+
+    test('getTrainComposition resolves Hungarian named IC routes when no number is given', () async {
+      final topart = await vagonweb.getTrainComposition(lineName: 'TÓPART IC');
+      expect(topart?.trainNumber, equals('856'));
+      expect(topart?.trainNumber, isNot(equals('562')));
+
+      final balaton = await vagonweb.getTrainComposition(lineName: 'BALATON IC');
+      expect(balaton?.trainNumber, equals('864'));
+
+      final mecsek = await vagonweb.getTrainComposition(lineName: 'MECSEK IC');
+      expect(mecsek?.trainNumber, equals('804'));
+
+      final napfeny = await vagonweb.getTrainComposition(lineName: 'NAPFÉNY IC');
+      expect(napfeny?.trainNumber, equals('702'));
+
+      final tisza = await vagonweb.getTrainComposition(lineName: 'TISZA IC');
+      expect(tisza?.trainNumber, equals('628'));
+
+      final arrabona = await vagonweb.getTrainComposition(lineName: 'ARRABONA IC');
+      expect(arrabona?.trainNumber, equals('982'));
+
+      final savaria = await vagonweb.getTrainComposition(lineName: 'SAVARIA IC');
+      expect(savaria?.trainNumber, equals('924'));
+
+      final gocsej = await vagonweb.getTrainComposition(lineName: 'GÖCSEJ IC');
+      expect(gocsej?.trainNumber, equals('954'));
+
+      final bakony = await vagonweb.getTrainComposition(lineName: 'BAKONY IC');
+      expect(bakony?.trainNumber, equals('904'));
+
+      final bekes = await vagonweb.getTrainComposition(lineName: 'BÉKÉS IC');
+      expect(bekes?.trainNumber, equals('7402'));
+
+      final herkules = await vagonweb.getTrainComposition(lineName: 'HERKULES');
+      expect(herkules?.trainNumber, equals('373'));
+      expect(herkules?.operatorName, contains('CFR'));
+    });
+
+    test('getTrainComposition never falls back to 562 for unknown IC', () async {
+      final unknownIc = await vagonweb.getTrainComposition(lineName: 'IC');
+      expect(unknownIc?.trainNumber, equals(''));
+      expect(unknownIc?.trainNumber, isNot(equals('562')));
+      expect(unknownIc?.vagonwebUrl, isNot(contains('cislo=562')));
     });
 
     test('extractTrainName cleans category prefixes and numbers', () {
@@ -52,6 +131,107 @@ void main() {
       expect(comp.carriages.first.series, contains('815'));
       expect(comp.carriages.first.seatCount, equals(600));
       expect(comp.carriages.first.isAccessible, isTrue);
+      expect(comp.carriages.first.effectiveLengthMeters, equals(155.8));
+    });
+
+    test('getTrainComposition returns Railjet Xpress for RJX line', () async {
+      final comp = await vagonweb.getTrainComposition(
+        lineName: 'RJX 60',
+        destination: 'München Hbf',
+      );
+
+      expect(comp, isNotNull);
+      expect(comp!.category, equals('RJX'));
+      expect(comp.carriages.length, equals(8));
+      expect(comp.carriages.first.series, contains('1116'));
+      expect(comp.carriages.any((c) => c.series.contains('Afmpz')), isTrue);
+      expect(comp.hasBistro, isTrue);
+    });
+
+    test('getTrainComposition returns EuroCity for EC line', () async {
+      final comp = await vagonweb.getTrainComposition(
+        lineName: 'EC 140 Hortobágy',
+        destination: 'Wien Hbf',
+      );
+
+      expect(comp, isNotNull);
+      expect(comp!.category, equals('EC'));
+      expect(comp.carriages.first.isLocomotive, isTrue);
+      expect(comp.carriages.any((c) => c.series.contains('WRRmz')), isTrue);
+      expect(comp.hasBistro, isTrue);
+    });
+
+    test('getTrainComposition returns Stadler FLIRT for S50 train', () async {
+      final comp = await vagonweb.getTrainComposition(
+        lineName: 'S50',
+        tripId: 'MAV:4814_100',
+        destination: 'Szolnok',
+      );
+
+      expect(comp, isNotNull);
+      expect(comp!.carriages.first.series, contains('415'));
+      expect(comp.carriages.first.effectiveLengthMeters, equals(74.3));
+    });
+
+    test('getTrainComposition never returns FLIRT for HÉV lines', () async {
+      final h5Comp = await vagonweb.getTrainComposition(
+        lineName: 'H5',
+        tripShortName: 'H4788 HÉV',
+      );
+      expect(h5Comp, isNull);
+
+      final szHComp = await vagonweb.getTrainComposition(
+        lineName: 'Sz H4788',
+        tripShortName: 'H4788 HÉV',
+      );
+      expect(szHComp, isNull);
+    });
+
+    test('CarriageInfo calculates effectiveLengthMeters correctly for scale display', () {
+      const kiss = CarriageInfo(
+        coachNumber: '1',
+        series: 'START 815 (KISS)',
+        typeName: 'Stadler KISS emeletes motorvonat',
+        className: '2. osztály',
+        imageUrl: '',
+      );
+      expect(kiss.effectiveLengthMeters, equals(155.8));
+
+      const flirt = CarriageInfo(
+        coachNumber: '1',
+        series: 'START 415 (FLIRT)',
+        typeName: 'Stadler FLIRT villamos motorvonat',
+        className: '2. osztály',
+        imageUrl: '',
+      );
+      expect(flirt.effectiveLengthMeters, equals(74.3));
+
+      const desiro = CarriageInfo(
+        coachNumber: '1',
+        series: 'START 426 (Desiro)',
+        typeName: 'Siemens Desiro dízel motorvonat',
+        className: '2. osztály',
+        imageUrl: '',
+      );
+      expect(desiro.effectiveLengthMeters, equals(41.7));
+
+      const loco = CarriageInfo(
+        coachNumber: '',
+        series: 'START 470 (Taurus)',
+        typeName: 'Villamos mozdony',
+        className: 'Mozdony',
+        imageUrl: '',
+      );
+      expect(loco.effectiveLengthMeters, equals(19.3));
+
+      const coach = CarriageInfo(
+        coachNumber: '20',
+        series: 'START Bbdpmz',
+        typeName: '2. osztályú személykocsi',
+        className: '2. osztály',
+        imageUrl: '',
+      );
+      expect(coach.effectiveLengthMeters, equals(26.4));
     });
   });
 
@@ -227,6 +407,244 @@ void main() {
       expect(find.textContaining('vagonWEB'), findsWidgets);
       expect(find.text('Menetirány'), findsOneWidget);
     });
+
+    testWidgets('renders horizontal scrollbar and responds to mouse wheel scrolling', (tester) async {
+      final mavProps = {
+        'id': 'MAV:562',
+        'line_name': 'IC 562 Tokaj',
+        'destination': 'Budapest-Keleti – Nyíregyháza',
+        'operator': 'MAV',
+        'vehicle_type': 'train',
+      };
+
+      await tester.pumpWidget(
+        ProviderScope(
+          child: MaterialApp(
+            home: Scaffold(
+              body: SizedBox(
+                width: 440,
+                height: 520,
+                child: VehicleTechnicalTabView(props: mavProps),
+              ),
+            ),
+          ),
+        ),
+      );
+
+      await tester.pumpAndSettle();
+
+      expect(find.byType(Scrollbar), findsOneWidget);
+      expect(find.byType(Listener), findsWidgets);
+    });
+
+    testWidgets('VehicleTechnicalTabView displays IC 856 and not IC 562 for Tópart train with trip_short_name', (tester) async {
+      final topartProps = {
+        'id': 'MAV:856',
+        'line_name': 'TÓPART IC',
+        'trip_short_name': '856 TÓPART InterCity',
+        'trip_id': 'MAV:1:36362214',
+        'destination': 'Nagykanizsa',
+        'operator': 'MAV',
+        'vehicle_type': 'train',
+      };
+
+      await tester.pumpWidget(
+        ProviderScope(
+          child: MaterialApp(
+            home: Scaffold(
+              body: SizedBox(
+                width: 440,
+                height: 520,
+                child: VehicleTechnicalTabView(props: topartProps),
+              ),
+            ),
+          ),
+        ),
+      );
+
+      await tester.pumpAndSettle();
+
+      expect(find.text('IC 856'), findsOneWidget);
+      expect(find.text('IC 562'), findsNothing);
+      expect(find.textContaining('TÓPART'), findsWidgets);
+    });
+
+    testWidgets('displays Material 3 empty state when no composition found', (tester) async {
+      final emptyProps = {
+        'id': 'MAV:99999',
+        'line_name': 'Személy 99999',
+        'operator': 'MAV',
+        'vehicle_type': 'train',
+      };
+
+      const emptyComposition = TrainComposition(
+        trainNumber: '99999',
+        trainName: 'Személy 99999',
+        category: 'Sz',
+        route: '',
+        operatorName: 'MÁV-START Zrt.',
+        year: 2026,
+        vagonwebUrl: 'https://www.vagonweb.cz/razeni/vlak.php?rok=2026&cislo=99999',
+        carriages: [],
+        actualCarriages: [],
+      );
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            trainCompositionProvider.overrideWith(
+              (ref, params) async => emptyComposition,
+            ),
+          ],
+          child: MaterialApp(
+            home: Scaffold(
+              body: SizedBox(
+                width: 440,
+                height: 520,
+                child: VehicleTechnicalTabView(props: emptyProps),
+              ),
+            ),
+          ),
+        ),
+      );
+
+      await tester.pumpAndSettle();
+
+      expect(
+        find.text('Ehhez a vonathoz nem található összeállítási információ a vagonWEB adatbázisában.'),
+        findsOneWidget,
+      );
+      expect(find.byIcon(Icons.train_outlined), findsOneWidget);
+    });
+
+    testWidgets('routes MÁV-labeled HÉVs to HBweb MXA technical sheet instead of FLIRT', (tester) async {
+      final hevMavProps = {
+        'id': 'MAV:1:1135',
+        'line_name': 'H5',
+        'operator': 'MAV',
+        'vehicle_type': 'train',
+        'trip_short_name': 'H4788 HÉV',
+      };
+
+      await tester.pumpWidget(
+        ProviderScope(
+          child: MaterialApp(
+            home: Scaffold(
+              body: SizedBox(
+                width: 440,
+                height: 520,
+                child: VehicleTechnicalTabView(props: hevMavProps),
+              ),
+            ),
+          ),
+        ),
+      );
+
+      await tester.pumpAndSettle();
+
+      // Must find MXA motorvonat, NOT FLIRT
+      expect(find.textContaining('MXA'), findsOneWidget);
+      expect(find.textContaining('FLIRT'), findsNothing);
+    });
+
+    testWidgets('allows switching between planned and actual composition tabs and shows under-carriage specs', (tester) async {
+      final mavProps = {
+        'id': 'MAV:868',
+        'line_name': 'IC 868 Balaton',
+        'operator': 'MAV',
+        'vehicle_type': 'train',
+      };
+
+      const detailedComposition = TrainComposition(
+        trainNumber: '868',
+        trainName: 'Balaton InterCity',
+        category: 'IC',
+        route: 'Budapest-Déli - Keszthely',
+        operatorName: 'MÁV-START Zrt.',
+        year: 2026,
+        actualDateLabel: '2026.10.19',
+        vagonwebUrl: 'https://www.vagonweb.cz/razeni/vlak.php?rok=2026&cislo=868',
+        carriages: [
+          CarriageInfo(
+            coachNumber: '',
+            series: '480',
+            operatorCode: 'START',
+            typeName: 'TRAXX villamos mozdony',
+            className: 'Mozdony',
+            imageUrl: '',
+          ),
+          CarriageInfo(
+            coachNumber: '5',
+            series: 'By/Byee',
+            operatorCode: 'START',
+            typeName: '2. osztályú személykocsi',
+            className: '2. osztály',
+            imageUrl: '',
+            seatCapacity: '80+6',
+            originDestination: 'Budapest-Déli - Keszthely',
+            hasWifi: true,
+            hasAc: true,
+          ),
+        ],
+        actualCarriages: [
+          CarriageInfo(
+            coachNumber: '',
+            series: '193',
+            operatorCode: 'ELOC',
+            typeName: 'Vectron villamos mozdony',
+            className: 'Mozdony',
+            imageUrl: '',
+          ),
+          CarriageInfo(
+            coachNumber: '5',
+            series: 'Byee',
+            operatorCode: 'START',
+            typeName: '2. osztályú személykocsi',
+            className: '2. osztály',
+            imageUrl: '',
+            seatCapacity: '80+6',
+            originDestination: 'Budapest-Déli - Keszthely',
+            hasWifi: true,
+            hasAc: true,
+          ),
+        ],
+      );
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            trainCompositionProvider.overrideWith(
+              (ref, params) async => detailedComposition,
+            ),
+          ],
+          child: MaterialApp(
+            home: Scaffold(
+              body: SizedBox(
+                width: 440,
+                height: 520,
+                child: VehicleTechnicalTabView(props: mavProps),
+              ),
+            ),
+          ),
+        ),
+      );
+
+      await tester.pumpAndSettle();
+
+      // Planned tab is active initially
+      expect(find.text('Tervezett összeállítás'), findsOneWidget);
+      expect(find.textContaining('Tényleges (2026.10.19)'), findsOneWidget);
+      expect(find.text('START 480'), findsOneWidget);
+      expect(find.text('80+6'), findsOneWidget);
+      expect(find.text('Budapest-Déli - Keszthely'), findsWidgets);
+
+      // Switch to actual composition tab
+      await tester.tap(find.textContaining('Tényleges (2026.10.19)'));
+      await tester.pumpAndSettle();
+
+      // Now actual composition is displayed with ELOC 193
+      expect(find.text('ELOC 193'), findsOneWidget);
+    });
   });
 
   group('TripStopSchedule Real-Time Delay Tests', () {
@@ -256,6 +674,91 @@ void main() {
       expect(stop.delaySeconds, equals(1320));
       expect(stop.lat, equals(47.1895));
       expect(stop.lon, equals(18.4231));
+    });
+  });
+
+  group('CarriageInfo classification & StationDetailCard layout tests', () {
+    test('CarriageInfo correctly classifies locomotives, multiple units and wagons', () {
+      const loco = CarriageInfo(
+        coachNumber: '',
+        series: '480',
+        typeName: 'Villamos mozdony',
+        className: 'Mozdony',
+        imageUrl: 'https://www.vagonweb.cz/popisy/img/START/480-a.gif',
+      );
+      expect(loco.isLocomotive, isTrue);
+      expect(loco.isMultipleUnit, isFalse);
+      expect(loco.isWagon, isFalse);
+
+      const emu = CarriageInfo(
+        coachNumber: '1',
+        series: 'START 815 (KISS)',
+        typeName: 'Stadler KISS 6 részes emeletes motorvonat',
+        className: '2. osztály',
+        imageUrl: 'https://www.vagonweb.cz/popisy/img/START/815-a.gif',
+      );
+      expect(emu.isLocomotive, isFalse);
+      expect(emu.isMultipleUnit, isTrue);
+      expect(emu.isWagon, isFalse);
+
+      const wagon = CarriageInfo(
+        coachNumber: '21',
+        series: 'Bmz 21-91',
+        typeName: '2. osztályú fülkés személykocsi',
+        className: '2. osztály',
+        imageUrl: 'https://www.vagonweb.cz/popisy/img/START/Bmz-2191-3-m-a.gif',
+      );
+      expect(wagon.isLocomotive, isFalse);
+      expect(wagon.isMultipleUnit, isFalse);
+      expect(wagon.isWagon, isTrue);
+    });
+
+    testWidgets('StationDetailCard stop group view renders without overflow on 380px width', (tester) async {
+      tester.view.physicalSize = const Size(380, 800);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(() => tester.view.resetPhysicalSize());
+
+      final groupNode = StopNode(
+        id: 'GROUP:Deák Ferenc tér:47.4979:19.0541',
+        hubId: 'BKK_F01001',
+        name: 'Deák Ferenc tér M',
+        lat: 47.4979,
+        lon: 19.0541,
+        operator: Operator.bkk,
+        platformCode: null,
+        isMultimodalHub: true,
+        vehicleType: 'metro',
+        servedRoutes: 'M1, M2, M3, 47, 48, 49, 100E',
+        direction: null,
+      );
+
+      await tester.pumpWidget(
+        ProviderScope(
+          child: MaterialApp(
+            theme: ThemeData(useMaterial3: true),
+            home: Scaffold(
+              body: Center(
+                child: SizedBox(
+                  width: 380,
+                  child: StationDetailCard(
+                    station: groupNode,
+                    onClose: () {},
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+
+      expect(find.text('Deák Ferenc tér M'), findsOneWidget);
+      expect(find.textContaining('Megállócsoport'), findsOneWidget);
+      expect(find.text('Indulások'), findsOneWidget);
+      expect(find.text('Érkezések'), findsOneWidget);
+      expect(tester.takeException(), isNull);
     });
   });
 }

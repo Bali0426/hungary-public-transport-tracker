@@ -1,57 +1,25 @@
-import urllib.request
-import json
+import urllib.request, json
 
-url = 'https://mavplusz.hu/otp2-backend/otp/routers/default/index/graphql'
-
-q = '''{
-  vehiclePositions(
-    swLat: 45.70
-    swLon: 16.10
-    neLat: 48.60
-    neLon: 22.95
-    modes: [RAIL, RAIL_REPLACEMENT_BUS, SUBURBAN_RAILWAY, TRAMTRAIN]
-  ) {
-    vehicleId
-    trip {
-      gtfsId
-      tripShortName
-      arrivalStoptime {
-        arrivalDelay
-      }
-      stoptimes {
-        arrivalDelay
-        departureDelay
-      }
-    }
+# Bounding box for Hungary: lat 45.7 to 48.6, lon 16.0 to 23.0
+query = """{
+  stopsByBbox(minLat: 45.7, minLon: 16.0, maxLat: 48.6, maxLon: 23.0) {
+    gtfsId
+    name
+    lat
+    lon
   }
-}'''
+}"""
 
 req = urllib.request.Request(
-    url,
-    data=json.dumps({'query': q}).encode('utf-8'),
-    headers={'Content-Type': 'application/json', 'User-Agent': 'Mozilla/5.0'}
+    'https://mavplusz.hu/otp2-backend/otp/routers/default/index/graphql',
+    data=json.dumps({'query': query}).encode('utf-8'),
+    headers={'Content-Type': 'application/json', 'Origin': 'https://mavplusz.hu', 'Referer': 'https://mavplusz.hu/'}
 )
-resp = urllib.request.urlopen(req)
-d = json.loads(resp.read().decode('utf-8'))
-vps = d.get('data', {}).get('vehiclePositions', [])
-print(f"Total vehicles: {len(vps)}")
 
-arr_delays = []
-st_delays = []
-
-for v in vps:
-    t = v.get('trip') or {}
-    arr_d = (t.get('arrivalStoptime') or {}).get('arrivalDelay') or 0
-    if arr_d > 0:
-        arr_delays.append(arr_d)
-    
-    # max delay in stoptimes
-    st_d_list = [s.get('departureDelay') or s.get('arrivalDelay') or 0 for s in t.get('stoptimes', [])]
-    max_st_d = max(st_d_list) if st_d_list else 0
-    if max_st_d > 0:
-        st_delays.append(max_st_d)
-
-print(f"Vehicles with arrivalStoptime delay > 0: {len(arr_delays)}")
-print(f"Vehicles with stoptimes delay > 0: {len(st_delays)}")
-if st_delays:
-    print(f"Max stoptimes delay: {max(st_delays)} s ({max(st_delays)//60} mins)")
+with urllib.request.urlopen(req, timeout=15) as resp:
+    data = json.loads(resp.read().decode('utf-8'))
+    stops = data['data']['stopsByBbox']
+    mav_rail = [s for s in stops if s['gtfsId'].startswith('1:')]
+    print(f"Total stops in bbox: {len(stops)}, MÁV rail stops: {len(mav_rail)}")
+    for s in mav_rail[:10]:
+        print(" ", s['gtfsId'], s['name'].encode('ascii', 'replace').decode(), s['lat'], s['lon'])

@@ -8,11 +8,13 @@ class TrainCompositionParams {
   final String lineName;
   final String? tripId;
   final String? destination;
+  final String? tripShortName;
 
   const TrainCompositionParams({
     required this.lineName,
     this.tripId,
     this.destination,
+    this.tripShortName,
   });
 
   @override
@@ -22,10 +24,15 @@ class TrainCompositionParams {
           runtimeType == other.runtimeType &&
           lineName == other.lineName &&
           tripId == other.tripId &&
-          destination == other.destination;
+          destination == other.destination &&
+          tripShortName == other.tripShortName;
 
   @override
-  int get hashCode => lineName.hashCode ^ tripId.hashCode ^ destination.hashCode;
+  int get hashCode =>
+      lineName.hashCode ^
+      tripId.hashCode ^
+      destination.hashCode ^
+      tripShortName.hashCode;
 }
 
 /// Fetches the train composition with carriage illustrations from vagonWEB (for MÁV trains).
@@ -36,6 +43,7 @@ final trainCompositionProvider =
     lineName: params.lineName,
     tripId: params.tripId,
     destination: params.destination,
+    tripShortName: params.tripShortName,
   );
 });
 

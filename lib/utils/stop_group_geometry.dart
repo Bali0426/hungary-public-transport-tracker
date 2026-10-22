@@ -5,61 +5,163 @@ import 'package:latlong2/latlong.dart';
 
 import '../bridge/bridge_generated.dart';
 
-/// Calculates convex hulls with metric rounded buffer zones for OSM-style station cluster enclosures ("bekerítve").
-class StopGroupGeometry {
-  static const double _bufferMeters = 24.0;
+/// Represents a clustered station hub with its platforms and centroid.
+class HubClusterInfo {
+  final String name;
+  final LatLng centroid;
+  final List<StopNode> stops;
+  final bool isMultimodal;
 
-  static List<Polygon> buildHubPolygons(
-    List<StopNode> platforms, {
-    required bool isDarkMode,
-  }) {
+  const HubClusterInfo({
+    required this.name,
+    required this.centroid,
+    required this.stops,
+    required this.isMultimodal,
+  });
+}
+
+/// Calculates convex hulls with ~20m rounded buffer zones for BudapestGO-style station hulls.
+class StopGroupGeometry {
+  static const double _bufferMeters = 20.0;
+
+  /// Fast metric distance approximation around Budapest (~47.5° lat).
+  static double distanceMeters(double lat1, double lon1, double lat2, double lon2) {
+    final dLat = (lat1 - lat2) * 111133.0;
+    final dLon = (lon1 - lon2) * 75150.0;
+    return math.sqrt(dLat * dLat + dLon * dLon);
+  }
+
+  /// Strips transport suffixes, platform brackets, and parentheticals
+  /// e.g. "Széll Kálmán tér M (Csaba utca)" -> "Széll Kálmán tér".
+  static String cleanStationName(String name) {
+    var s = name.trim();
+    if (s.endsWith(')')) {
+      final idx = s.lastIndexOf('(');
+      if (idx != -1) s = s.substring(0, idx).trim();
+    }
+    if (s.endsWith(']')) {
+      final idx = s.lastIndexOf('[');
+      if (idx != -1) s = s.substring(0, idx).trim();
+    }
+    s = s.replaceAll(RegExp(r'\s+M\+H\b', caseSensitive: false), '');
+    s = s.replaceAll(RegExp(r'\s+M\b'), '');
+    s = s.replaceAll(RegExp(r'\s+H\b'), '');
+    return s.trim();
+  }
+
+  /// Clusters platforms by clean name / hub ID within 150-250m (~220m).
+  /// Different named adjacent hubs (e.g. Boráros tér vs Mester utca) remain separate.
+  static List<HubClusterInfo> getHubClusters(List<StopNode> platforms) {
     if (platforms.isEmpty) return const [];
 
-    final Map<String, List<StopNode>> hubGroups = {};
+    final List<List<StopNode>> clusters = [];
+
     for (final p in platforms) {
-      if (p.hubId != null && p.hubId!.isNotEmpty) {
-        hubGroups.putIfAbsent(p.hubId!, () => []).add(p);
-      } else {
-        // Group by name + spatial proximity (within ~300 meters)
-        bool added = false;
-        for (final entry in hubGroups.entries) {
-          if (entry.value.first.name == p.name) {
-            final first = entry.value.first;
-            final dLat = (first.lat - p.lat).abs();
-            final dLon = (first.lon - p.lon).abs();
-            if (dLat < 0.003 && dLon < 0.004) {
-              entry.value.add(p);
-              added = true;
+      final pName = cleanStationName(p.name).toLowerCase();
+      bool added = false;
+      for (final cluster in clusters) {
+        final first = cluster.first;
+        final clusterName = cleanStationName(first.name).toLowerCase();
+        final sameIdentity = (p.hubId != null && p.hubId!.isNotEmpty && p.hubId == first.hubId) ||
+            (pName == clusterName);
+        if (sameIdentity) {
+          final isClose = cluster.any((s) => distanceMeters(s.lat, s.lon, p.lat, p.lon) <= 220.0);
+          if (isClose) {
+            cluster.add(p);
+            added = true;
+            break;
+          }
+        }
+      }
+      if (!added) {
+        clusters.add([p]);
+      }
+    }
+
+    // Merge clusters that share identity and are within 220m
+    bool mergedAny = true;
+    while (mergedAny) {
+      mergedAny = false;
+      for (int i = 0; i < clusters.length; i++) {
+        for (int j = i + 1; j < clusters.length; j++) {
+          final c1 = clusters[i];
+          final c2 = clusters[j];
+          final name1 = cleanStationName(c1.first.name).toLowerCase();
+          final name2 = cleanStationName(c2.first.name).toLowerCase();
+          final sameIdentity = (c1.first.hubId != null && c1.first.hubId!.isNotEmpty && c1.first.hubId == c2.first.hubId) ||
+              (name1 == name2);
+          if (sameIdentity) {
+            final isClose = c1.any((s1) => c2.any((s2) => distanceMeters(s1.lat, s1.lon, s2.lat, s2.lon) <= 220.0));
+            if (isClose) {
+              c1.addAll(c2);
+              clusters.removeAt(j);
+              mergedAny = true;
               break;
             }
           }
         }
-        if (!added) {
-          hubGroups['${p.name}_${p.lat.toStringAsFixed(3)}_${p.lon.toStringAsFixed(3)}'] = [p];
-        }
+        if (mergedAny) break;
       }
     }
 
-    final polygons = <Polygon>[];
+    return clusters.map((group) {
+      double sumLat = 0;
+      double sumLon = 0;
+      bool isMm = false;
+      for (final s in group) {
+        sumLat += s.lat;
+        sumLon += s.lon;
+        if (s.isMultimodalHub) isMm = true;
+      }
+      final centroid = LatLng(sumLat / group.length, sumLon / group.length);
+      return HubClusterInfo(
+        name: cleanStationName(group.first.name),
+        centroid: centroid,
+        stops: group,
+        isMultimodal: isMm,
+      );
+    }).toList();
+  }
+
+  static final Map<String, List<LatLng>> _prebakedHullCache = {};
+
+  /// Builds buffered hull polygons styled according to BudapestGO LOD specs.
+  static List<Polygon> buildHubPolygons(
+    List<StopNode> platforms, {
+    required bool isDarkMode,
+    double zoom = 15.0,
+  }) {
+    if (platforms.isEmpty || zoom < 15.0) return const [];
+
+    final clusters = getHubClusters(platforms);
+
+    // Stop group polygon fills: grayish in light mode, brownish in dark mode
     final fillColor = isDarkMode
-        ? const Color(0x3064748B) // Slate translucent fill (~19% opacity)
-        : const Color(0x2864748B);
+        ? const Color.fromRGBO(145, 95, 45, 0.28)
+        : const Color.fromRGBO(120, 120, 120, 0.22);
     final strokeColor = isDarkMode
-        ? const Color(0x8C94A3B8) // Slate subtle stroke
-        : const Color(0xA6475569);
+        ? const Color(0xFFC48246)
+        : const Color(0xFF707070);
+    const strokeWidth = 1.2;
 
-    for (final entry in hubGroups.entries) {
-      final stops = entry.value;
-      if (stops.length < 2) continue; // Multi-platform hubs receive an enclosed station boundary
+    final polygons = <Polygon>[];
 
-      final points = _createBufferedConvexHull(stops, _bufferMeters);
+    for (final cluster in clusters) {
+      if (cluster.stops.length < 2) continue; // Multi-platform hubs receive boundary hull
+
+      final clusterKey = '${cluster.name}_${cluster.stops.length}_${cluster.stops.first.id}';
+      final points = _prebakedHullCache.putIfAbsent(
+        clusterKey,
+        () => _createBufferedConvexHull(cluster.stops, _bufferMeters),
+      );
+
       if (points.length >= 3) {
         polygons.add(
           Polygon(
             points: points,
             color: fillColor,
             borderColor: strokeColor,
-            borderStrokeWidth: 1.5,
+            borderStrokeWidth: strokeWidth,
             strokeJoin: StrokeJoin.round,
             strokeCap: StrokeCap.round,
           ),
@@ -72,19 +174,28 @@ class StopGroupGeometry {
   static List<LatLng> _createBufferedConvexHull(List<StopNode> stops, double bufferM) {
     if (stops.isEmpty) return const [];
 
+    // Filter duplicate or near-identical coordinates
+    final uniqueStops = <StopNode>[];
+    for (final s in stops) {
+      if (!uniqueStops.any((u) => (u.lat - s.lat).abs() < 1e-5 && (u.lon - s.lon).abs() < 1e-5)) {
+        uniqueStops.add(s);
+      }
+    }
+    if (uniqueStops.length < 2) return const [];
+
     double sumLat = 0;
     double sumLon = 0;
-    for (final s in stops) {
+    for (final s in uniqueStops) {
       sumLat += s.lat;
       sumLon += s.lon;
     }
-    final centerLat = sumLat / stops.length;
-    final centerLon = sumLon / stops.length;
+    final centerLat = sumLat / uniqueStops.length;
+    final centerLon = sumLon / uniqueStops.length;
     final latRad = centerLat * math.pi / 180.0;
     final metersPerDegLat = 111132.954 - 559.822 * math.cos(2 * latRad);
     final metersPerDegLon = 111412.84 * math.cos(latRad);
 
-    final pts = stops.map((s) {
+    final pts = uniqueStops.map((s) {
       final x = (s.lon - centerLon) * metersPerDegLon;
       final y = (s.lat - centerLat) * metersPerDegLat;
       return math.Point<double>(x, y);

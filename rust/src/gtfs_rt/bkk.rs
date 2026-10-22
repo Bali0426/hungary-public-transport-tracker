@@ -192,6 +192,7 @@ pub fn decode_bkk_vehicle_positions_bytes(
 
         let mut operator = Operator::BKK;
         let vehicle_type: String;
+        let mut trip_short_name: Option<String> = None;
 
         if is_mav_train {
             operator = Operator::MAV;
@@ -203,15 +204,63 @@ pub fn decode_bkk_vehicle_positions_bytes(
                 .and_then(|t| t.split('_').next())
                 .unwrap_or("");
 
-            line_name = if r_str == "S" && !train_num.is_empty() {
-                format!("S {}", train_num)
-            } else if !r_str.is_empty() {
-                r_str.to_string()
-            } else {
-                "MÁV".to_string()
-            };
+            let is_suburban = (r_str.starts_with('S')
+                || r_str.starts_with('G')
+                || r_str.starts_with('Z')
+                || r_str.starts_with('X'))
+                && r_str.len() >= 2
+                && r_str.len() <= 5
+                && r_str[1..].chars().all(|c| c.is_ascii_digit());
 
-            destination = if !raw_label.is_empty() && !train_num.is_empty() {
+            if is_suburban {
+                line_name = r_str.to_string();
+                trip_short_name = if !train_num.is_empty() {
+                    Some(format!("{} ({})", r_str, train_num))
+                } else {
+                    Some(r_str.to_string())
+                };
+            } else if r_str.eq_ignore_ascii_case("RJ")
+                || r_str.eq_ignore_ascii_case("RJX")
+                || raw_label.to_lowercase().contains("railjet")
+            {
+                line_name = "Railjet".to_string();
+                trip_short_name = if !train_num.is_empty() {
+                    Some(format!("Railjet {}", train_num))
+                } else {
+                    Some("Railjet".to_string())
+                };
+            } else if matches!(r_str, "IC" | "EC" | "EN" | "IR" | "EX") {
+                let cat = match r_str {
+                    "IC" => "IC",
+                    "EC" => "EC",
+                    "EN" => "EN",
+                    "IR" => "IR",
+                    _ => "Ex",
+                };
+                if !raw_label.is_empty() && !raw_label.eq_ignore_ascii_case(cat) {
+                    let clean_label = raw_label.split('/').next().unwrap_or(&raw_label).trim();
+                    line_name = format!("{} {}", clean_label, cat);
+                } else if !train_num.is_empty() {
+                    line_name = format!("{} {}", cat, train_num);
+                } else {
+                    line_name = cat.to_string();
+                }
+                trip_short_name = if !train_num.is_empty() {
+                    Some(format!("{} ({})", line_name, train_num))
+                } else {
+                    Some(line_name.clone())
+                };
+            } else if !train_num.is_empty() {
+                line_name = format!("Sz {}", train_num);
+                trip_short_name = Some(format!("{} személyvonat", train_num));
+            } else if !r_str.is_empty() {
+                line_name = r_str.to_string();
+                trip_short_name = Some(r_str.to_string());
+            } else {
+                line_name = "MÁV".to_string();
+            }
+
+            destination = if !raw_label.is_empty() && !train_num.is_empty() && !raw_label.contains(train_num) {
                 format!("{} ({}. sz. vonat)", raw_label, train_num)
             } else if !raw_label.is_empty() {
                 raw_label
@@ -279,7 +328,7 @@ pub fn decode_bkk_vehicle_positions_bytes(
             timestamp: vp.timestamp.unwrap_or(feed_ts),
             route_color,
             vehicle_type,
-            trip_short_name: None,
+            trip_short_name,
             delay_cause: None,
         });
     }

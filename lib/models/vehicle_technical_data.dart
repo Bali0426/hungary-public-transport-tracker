@@ -18,6 +18,11 @@ class CarriageInfo {
   final bool hasBistro;
   final bool hasQuietZone;
   final String notes;
+  final double? lengthMeters;
+  final String? operatorCode; // e.g. "START", "MÁV", "GYSEV", "ELOC"
+  final String? routeHeader; // e.g. "IC 868 BALATON"
+  final String? originDestination; // e.g. "Budapest-Déli - Keszthely"
+  final String? seatCapacity; // e.g. "80+6", "60", "42"
 
   const CarriageInfo({
     required this.coachNumber,
@@ -35,10 +40,66 @@ class CarriageInfo {
     this.hasBistro = false,
     this.hasQuietZone = false,
     this.notes = '',
+    this.lengthMeters,
+    this.operatorCode,
+    this.routeHeader,
+    this.originDestination,
+    this.seatCapacity,
   });
 
   bool get isLocomotive =>
       className.toLowerCase().contains('mozdony') || coachNumber.isEmpty;
+
+  bool get isMultipleUnit {
+    final s = series.toLowerCase();
+    final t = typeName.toLowerCase();
+    return s.contains('815') ||
+        s.contains('kiss') ||
+        t.contains('kiss') ||
+        s.contains('415') ||
+        s.contains('flirt') ||
+        t.contains('flirt') ||
+        s.contains('425') ||
+        s.contains('talent') ||
+        t.contains('talent') ||
+        s.contains('426') ||
+        s.contains('desiro') ||
+        t.contains('desiro') ||
+        s.contains('117') ||
+        s.contains('bzmot') ||
+        t.contains('bzmot') ||
+        t.contains('motorvonat');
+  }
+
+  bool get isWagon => !isLocomotive && !isMultipleUnit;
+
+  /// Effective length in meters for scale-accurate vehicle drawing visualization.
+  double get effectiveLengthMeters {
+    if (lengthMeters != null && lengthMeters! > 0) {
+      return lengthMeters!;
+    }
+    final s = series.toLowerCase();
+    final t = typeName.toLowerCase();
+    if (s.contains('815') || s.contains('kiss') || t.contains('kiss')) {
+      return 155.8;
+    }
+    if (s.contains('415') || s.contains('flirt') || t.contains('flirt')) {
+      return 74.3;
+    }
+    if (s.contains('425') || s.contains('talent') || t.contains('talent')) {
+      return 66.8;
+    }
+    if (s.contains('426') || s.contains('desiro') || t.contains('desiro')) {
+      return 41.7;
+    }
+    if (s.contains('117') || s.contains('bzmot') || t.contains('bzmot')) {
+      return 14.0;
+    }
+    if (isLocomotive) {
+      return 19.3;
+    }
+    return 26.4;
+  }
 }
 
 /// A complete train composition (vagonWEB).
@@ -49,6 +110,8 @@ class TrainComposition {
   final String route; // e.g. "Budapest-Keleti - Miskolc - Nyíregyháza"
   final String operatorName; // "MÁV-START Zrt."
   final List<CarriageInfo> carriages;
+  final List<CarriageInfo> actualCarriages;
+  final String? actualDateLabel; // e.g. "2026.10.19" or "po 19.10.2026"
   final String vagonwebUrl;
   final int year;
   final int? totalLengthMeters;
@@ -60,6 +123,8 @@ class TrainComposition {
     required this.route,
     required this.operatorName,
     required this.carriages,
+    this.actualCarriages = const [],
+    this.actualDateLabel,
     required this.vagonwebUrl,
     required this.year,
     this.totalLengthMeters,

@@ -11,7 +11,7 @@ use reqwest::Client;
 use tokio::runtime::Runtime;
 
 use crate::gtfs_rt::bkk::fetch_bkk_live_vehicles;
-use crate::gtfs_rt::mav::fetch_mav_live_vehicles;
+use crate::gtfs_rt::mav::{fetch_mav_live_vehicles, fetch_mav_station_departures};
 use crate::gtfs_rt::models::{BoundingBox, StopNode, UnifiedDeparture, UnifiedVehicle};
 use crate::static_db::repository::StaticTransitRepository;
 use crate::static_db::spatial::{filter_vehicles_in_bbox, vehicles_to_geojson};
@@ -142,7 +142,32 @@ pub async fn poll_live_vehicles_in_bbox(
         combined_delays.extend(bkk_d);
     }
     if let Ok((mav_v, mav_d, mav_s)) = mav_res {
-        combined_vehicles.extend(mav_v);
+        // Deduplicate MÁV vehicles: specifically HÉV vehicles that already exist in BKK feed
+        let bkk_hevs: Vec<(String, String, f64, f64)> = combined_vehicles
+            .iter()
+            .filter(|v| v.vehicle_type == "suburban_rail" || v.line_name.starts_with('H'))
+            .map(|v| (v.line_name.clone(), v.trip_id.clone().unwrap_or_default(), v.lat, v.lon))
+            .collect();
+
+        for mv in mav_v {
+            let is_hev = mv.vehicle_type == "suburban_rail" || mv.line_name.starts_with('H');
+            if is_hev {
+                let mv_num = mv.trip_short_name.as_deref().unwrap_or("");
+                let is_dup = bkk_hevs.iter().any(|(b_line, b_tid, b_lat, b_lon)| {
+                    let dlat = b_lat - mv.lat;
+                    let dlon = b_lon - mv.lon;
+                    let close_dist = (dlat * dlat + dlon * dlon) < 0.00005;
+                    let same_line = b_line.eq_ignore_ascii_case(&mv.line_name);
+                    let same_train_num = !mv_num.is_empty() && b_tid.contains(mv_num);
+                    (same_line && close_dist) || same_train_num
+                });
+                if is_dup {
+                    continue; // Skip duplicate MÁV HÉV, prefer BKK's entry
+                }
+            }
+            combined_vehicles.push(mv);
+        }
+
         combined_delays.extend(mav_d);
         combined_schedules.extend(mav_s);
     }
@@ -251,9 +276,12 @@ pub fn get_station_departure_board(
     horizon_minutes: i32,
     limit: usize,
 ) -> Result<Vec<UnifiedDeparture>> {
-    let guard = ENGINE_STATE.read().unwrap();
-    let Some(ref repo) = guard.repo else {
-        anyhow::bail!("Static database is not initialized");
+    let (repo, client, cached_delays) = {
+        let guard = ENGINE_STATE.read().unwrap();
+        let Some(ref repo) = guard.repo else {
+            anyhow::bail!("Static database is not initialized");
+        };
+        (repo.clone(), guard.http_client.clone(), guard.cached_trip_delays.clone())
     };
 
     let now = Local::now();
@@ -261,14 +289,47 @@ pub fn get_station_departure_board(
     let seconds_since_midnight =
         (now.hour() * 3600 + now.minute() * 60 + now.second()) as i32;
 
-    repo.get_unified_departures(
+    let is_mav = stop_or_hub_id.contains("MAV")
+        || stop_or_hub_id.contains("1:0055")
+        || stop_or_hub_id.starts_with("1:")
+        || stop_or_hub_id.contains("005510");
+
+    // For MÁV rail stations, prefer live MÁV OTP2 GraphQL departure board (has live platforms, delays, coupled train merges)
+    if is_mav {
+        let mav_res = TOKIO_RT.block_on(fetch_mav_station_departures(&client, &stop_or_hub_id, limit));
+        if let Ok(mav_deps) = mav_res {
+            if !mav_deps.is_empty() {
+                return Ok(mav_deps);
+            }
+        }
+    }
+
+    let local_res = repo.get_unified_departures(
         &stop_or_hub_id,
         &service_date,
         seconds_since_midnight - 120, // Include trains/buses departing in the last 2 minutes
         (horizon_minutes.max(15)) * 60,
-        &guard.cached_trip_delays,
+        &cached_delays,
         limit,
-    )
+    );
+
+    if let Ok(ref deps) = local_res {
+        if !deps.is_empty() {
+            return Ok(deps.clone());
+        }
+    }
+
+    // Fallback: Query live MÁV OTP2 GraphQL endpoint for rural or MÁV railway stations if not tried yet
+    if !is_mav {
+        let mav_res = TOKIO_RT.block_on(fetch_mav_station_departures(&client, &stop_or_hub_id, limit));
+        if let Ok(mav_deps) = mav_res {
+            if !mav_deps.is_empty() {
+                return Ok(mav_deps);
+            }
+        }
+    }
+
+    local_res
 }
 
 /// Returns the scheduled stop sequence and departure times for a given trip_id.

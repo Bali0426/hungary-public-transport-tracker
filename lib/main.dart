@@ -8,6 +8,7 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
 import 'bridge/bridge_generated.dart';
+import 'providers/live_vehicles_provider.dart';
 import 'views/map_screen.dart';
 
 /// Prepares the local `transit_static.db` so the Rust `rusqlite` engine can open it.
@@ -19,7 +20,7 @@ Future<String> _ensureLocalStaticDatabase() async {
   }
 
   final docDir = await getApplicationSupportDirectory();
-  final dbFile = File(p.join(docDir.path, 'transit_static.db'));
+  final dbFile = File(p.join(docDir.path, 'transit_static_v2.db'));
 
   if (!dbFile.existsSync() || dbFile.lengthSync() < 1000000) {
     await dbFile.parent.create(recursive: true);
@@ -54,20 +55,72 @@ Future<void> main() async {
   );
 }
 
-class HungaryTransitApp extends StatelessWidget {
+class HungaryTransitApp extends ConsumerWidget {
   const HungaryTransitApp({super.key});
 
+  static ThemeData _buildTheme(Brightness brightness) {
+    final isDark = brightness == Brightness.dark;
+    final colorScheme = ColorScheme.fromSeed(
+      seedColor: const Color(0xFF0077D4),
+      brightness: brightness,
+      surface: isDark ? const Color(0xFF0F172A) : const Color(0xFFF8FAFC),
+    );
+
+    return ThemeData(
+      useMaterial3: true,
+      colorScheme: colorScheme,
+      brightness: brightness,
+      scaffoldBackgroundColor: colorScheme.surface,
+      cardTheme: CardThemeData(
+        elevation: isDark ? 4 : 2,
+        color: isDark ? colorScheme.surfaceContainer : colorScheme.surfaceContainerLowest,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(16),
+          side: BorderSide(
+            color: isDark ? Colors.white12 : Colors.black12,
+            width: 1,
+          ),
+        ),
+        clipBehavior: Clip.antiAlias,
+      ),
+      segmentedButtonTheme: SegmentedButtonThemeData(
+        style: SegmentedButton.styleFrom(
+          visualDensity: VisualDensity.compact,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(10),
+          ),
+        ),
+      ),
+      chipTheme: ChipThemeData(
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(8),
+        ),
+        side: BorderSide.none,
+      ),
+      floatingActionButtonTheme: FloatingActionButtonThemeData(
+        elevation: 3,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(14),
+        ),
+      ),
+      dialogTheme: DialogThemeData(
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(20),
+        ),
+      ),
+    );
+  }
+
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
+    final isDark = ref.watch(mapDarkModeProvider);
+
     return MaterialApp(
       title: 'Hungary Public Transport Tracker',
       debugShowCheckedModeBanner: false,
-      theme: ThemeData.dark(useMaterial3: true).copyWith(
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xFF009EE3),
-          brightness: Brightness.dark,
-        ),
-      ),
+      theme: _buildTheme(Brightness.light),
+      darkTheme: _buildTheme(Brightness.dark),
+      themeMode: isDark ? ThemeMode.dark : ThemeMode.light,
       home: const MapScreen(),
     );
   }

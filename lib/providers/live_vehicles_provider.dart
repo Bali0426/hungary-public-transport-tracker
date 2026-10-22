@@ -51,6 +51,9 @@ final showStopGroupsProvider = StateProvider<bool>((ref) => false);
 /// Whether individual platforms / stop posts (directions) should be displayed on the map
 final showPlatformsProvider = StateProvider<bool>((ref) => false);
 
+/// Number of vehicles currently rendered on screen in the camera viewport
+final renderedVehiclesCountProvider = StateProvider<int>((ref) => 0);
+
 /// Cache of the last successfully polled GeoJSON to prevent any flickering
 String _lastEmittedGeoJson = '';
 

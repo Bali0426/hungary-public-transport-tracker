@@ -7,7 +7,7 @@ import '../../providers/timetable_provider.dart';
 import '../../utils/transit_display_utils.dart';
 import '../vehicle_technical_tab_view.dart';
 
-/// Top-Right Floating Vehicle Detail Card with Schedule / Timetable and Technical Specs.
+/// Top-Right Floating Vehicle Detail Card with Schedule / Timetable and Technical Specs in Material 3.
 class VehicleDetailCard extends ConsumerStatefulWidget {
   final Map<String, dynamic> props;
   final VoidCallback onClose;
@@ -73,315 +73,244 @@ class _VehicleDetailCardState extends ConsumerState<VehicleDetailCard> {
 
     final Color badgeBg = getModeBadgeColor(vType);
     final isMav = op == 'MAV' || vType == 'train';
+    final theme = Theme.of(context);
 
     final scheduleAsync = tripId.isNotEmpty
         ? ref.watch(tripScheduleProvider(tripId))
         : null;
 
-    return Container(
-      constraints: const BoxConstraints(maxHeight: 580),
-      decoration: BoxDecoration(
-        color: const Color(0xF70F172A),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: Colors.white24, width: 1.2),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.6),
-            blurRadius: 16,
-            offset: const Offset(0, 6),
-          ),
-        ],
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // Header Row
-          Container(
-            padding: const EdgeInsets.fromLTRB(16, 14, 10, 12),
-            decoration: const BoxDecoration(
-              border: Border(bottom: BorderSide(color: Colors.white12)),
-            ),
-            child: Row(
-              children: [
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-                  decoration: BoxDecoration(
-                    color: badgeBg,
-                    borderRadius: BorderRadius.circular(8),
-                    boxShadow: [
-                      BoxShadow(
-                        color: badgeBg.withValues(alpha: 0.5),
-                        blurRadius: 4,
-                      ),
-                    ],
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(getModeIconData(vType), size: 16, color: Colors.white),
-                      const SizedBox(width: 6),
-                      Text(
-                        lineName,
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontWeight: FontWeight.w900,
-                          fontSize: 15,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
-                  decoration: BoxDecoration(
-                    color: op == 'MAV' ? const Color(0xFF0057B8) : const Color(0xFF009EE3),
-                    borderRadius: BorderRadius.circular(4),
-                  ),
-                  child: Text(
-                    op,
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 10,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                ),
-                if (speedKmh > 0) ...[
-                  const SizedBox(width: 8),
+    return Card(
+      elevation: 6,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+      color: theme.colorScheme.surfaceContainer,
+      margin: EdgeInsets.zero,
+      clipBehavior: Clip.antiAlias,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxHeight: 580),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // Header Row
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 12, 10, 10),
+              child: Row(
+                children: [
                   Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+                    padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4.5),
                     decoration: BoxDecoration(
-                      color: Colors.cyanAccent.withValues(alpha: 0.15),
-                      border: Border.all(color: Colors.cyanAccent.withValues(alpha: 0.4), width: 1),
-                      borderRadius: BorderRadius.circular(5),
+                      color: badgeBg,
+                      borderRadius: BorderRadius.circular(8),
                     ),
                     child: Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        const Icon(Icons.speed, size: 12, color: Colors.cyanAccent),
-                        const SizedBox(width: 4),
+                        TransitModeCircleIcon(mode: vType, size: 18),
+                        const SizedBox(width: 6),
                         Text(
-                          '$speedKmh km/h',
-                          style: const TextStyle(
-                            color: Colors.cyanAccent,
-                            fontSize: 11,
-                            fontWeight: FontWeight.bold,
+                          lineName,
+                          style: TextStyle(
+                            color: getModeForegroundColor(vType),
+                            fontWeight: FontWeight.w900,
+                            fontSize: 14.5,
                           ),
                         ),
                       ],
                     ),
                   ),
-                ],
-                const Spacer(),
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                  decoration: BoxDecoration(
-                    color: delayBadgeColor.withValues(alpha: 0.2),
-                    border: Border.all(color: delayBadgeColor, width: 1),
-                    borderRadius: BorderRadius.circular(6),
-                  ),
-                  child: Text(
-                    delayLabel,
-                    style: TextStyle(
-                      color: delayBadgeColor,
-                      fontSize: 11,
-                      fontWeight: FontWeight.bold,
+                  const SizedBox(width: 8),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+                    decoration: BoxDecoration(
+                      color: op == 'MAV' ? const Color(0xFF0057B8) : const Color(0xFF009EE3),
+                      borderRadius: BorderRadius.circular(5),
+                    ),
+                    child: Text(
+                      op,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 10,
+                        fontWeight: FontWeight.bold,
+                      ),
                     ),
                   ),
-                ),
-                const SizedBox(width: 4),
-                IconButton(
-                  icon: const Icon(Icons.close, size: 18, color: Colors.white60),
-                  onPressed: widget.onClose,
-                  padding: EdgeInsets.zero,
-                  constraints: const BoxConstraints(),
-                ),
-              ],
+                  if (speedKmh > 0) ...[
+                    const SizedBox(width: 8),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+                      decoration: BoxDecoration(
+                        color: theme.colorScheme.secondaryContainer,
+                        borderRadius: BorderRadius.circular(6),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.speed, size: 13, color: theme.colorScheme.onSecondaryContainer),
+                          const SizedBox(width: 4),
+                          Text(
+                            '$speedKmh km/h',
+                            style: TextStyle(
+                              color: theme.colorScheme.onSecondaryContainer,
+                              fontSize: 11,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                  const Spacer(),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3.5),
+                    decoration: BoxDecoration(
+                      color: delayBadgeColor.withValues(alpha: 0.18),
+                      border: Border.all(color: delayBadgeColor.withValues(alpha: 0.7), width: 1),
+                      borderRadius: BorderRadius.circular(6),
+                    ),
+                    child: Text(
+                      delayLabel,
+                      style: TextStyle(
+                        color: delayBadgeColor,
+                        fontSize: 11,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 4),
+                  IconButton(
+                    icon: const Icon(Icons.close, size: 18),
+                    onPressed: widget.onClose,
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints(),
+                  ),
+                ],
+              ),
             ),
-          ),
 
-          // Destination & Train Name & Disruption Banner
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 10, 16, 8),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                if (tripShortName.isNotEmpty && tripShortName != lineName) ...[
+            // Destination & Train Name & Disruption Banner
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 2, 16, 8),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  if (tripShortName.isNotEmpty && tripShortName != lineName) ...[
+                    Text(
+                      tripShortName,
+                      style: theme.textTheme.titleMedium?.copyWith(
+                        fontWeight: FontWeight.w800,
+                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    const SizedBox(height: 2),
+                  ],
                   Text(
-                    tripShortName,
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontWeight: FontWeight.w800,
-                      fontSize: 16,
+                    dest.isNotEmpty ? '$dest felé' : 'Menetrend szerinti útvonal',
+                    style: TextStyle(
+                      color: (tripShortName.isNotEmpty && tripShortName != lineName)
+                          ? theme.colorScheme.onSurfaceVariant
+                          : theme.colorScheme.onSurface,
+                      fontWeight: (tripShortName.isNotEmpty && tripShortName != lineName)
+                          ? FontWeight.w500
+                          : FontWeight.w700,
+                      fontSize: (tripShortName.isNotEmpty && tripShortName != lineName) ? 13 : 15,
+                    ),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    'Jármű ID: $vehicleId ${tripId.isNotEmpty ? "• Menet ID: $tripId" : ""}',
+                    style: theme.textTheme.labelSmall?.copyWith(
+                      color: theme.colorScheme.onSurfaceVariant.withValues(alpha: 0.7),
                     ),
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                   ),
-                  const SizedBox(height: 2),
-                ],
-                Text(
-                  dest.isNotEmpty ? '$dest felé' : 'Menetrend szerinti útvonal',
-                  style: TextStyle(
-                    color: (tripShortName.isNotEmpty && tripShortName != lineName) ? Colors.white70 : Colors.white,
-                    fontWeight: (tripShortName.isNotEmpty && tripShortName != lineName) ? FontWeight.w500 : FontWeight.w700,
-                    fontSize: (tripShortName.isNotEmpty && tripShortName != lineName) ? 13 : 15,
-                  ),
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                ),
-                const SizedBox(height: 3),
-                Text(
-                  'Jármű ID: $vehicleId ${tripId.isNotEmpty ? "• Menet ID: $tripId" : ""}',
-                  style: const TextStyle(color: Colors.white54, fontSize: 11),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-                if (delayCause.isNotEmpty) ...[
-                  const SizedBox(height: 6),
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFFEF4444).withValues(alpha: 0.15),
-                      border: Border.all(color: const Color(0xFFEF4444).withValues(alpha: 0.6)),
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    child: Row(
-                      children: [
-                        const Icon(Icons.warning_amber_rounded, size: 16, color: Color(0xFFFCA5A5)),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: Text(
-                            delayCause,
-                            style: const TextStyle(
-                              color: Color(0xFFFECACA),
-                              fontSize: 11,
-                              fontWeight: FontWeight.w600,
+                  if (delayCause.isNotEmpty) ...[
+                    const SizedBox(height: 6),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                      decoration: BoxDecoration(
+                        color: theme.colorScheme.errorContainer.withValues(alpha: 0.7),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: Row(
+                        children: [
+                          Icon(Icons.warning_amber_rounded, size: 16, color: theme.colorScheme.error),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              delayCause,
+                              style: TextStyle(
+                                color: theme.colorScheme.onErrorContainer,
+                                fontSize: 11,
+                                fontWeight: FontWeight.w600,
+                              ),
                             ),
                           ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
-              ],
-            ),
-          ),
-
-          // Navigation Segmented Switcher (Menetrend vs Műszaki infó)
-          Padding(
-            padding: const EdgeInsets.fromLTRB(14, 2, 14, 8),
-            child: Container(
-              height: 36,
-              decoration: BoxDecoration(
-                color: Colors.black26,
-                borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: Colors.white12),
-              ),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: GestureDetector(
-                      onTap: () => setState(() => _activeTab = 0),
-                      child: Container(
-                        decoration: BoxDecoration(
-                          color: _activeTab == 0
-                              ? Colors.white.withValues(alpha: 0.16)
-                              : Colors.transparent,
-                          borderRadius: BorderRadius.circular(7),
-                        ),
-                        alignment: Alignment.center,
-                        child: Row(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            Icon(
-                              Icons.schedule,
-                              size: 14,
-                              color: _activeTab == 0 ? Colors.cyanAccent : Colors.white60,
-                            ),
-                            const SizedBox(width: 6),
-                            Text(
-                              'Menetrend',
-                              style: TextStyle(
-                                color: _activeTab == 0 ? Colors.white : Colors.white60,
-                                fontWeight: _activeTab == 0 ? FontWeight.bold : FontWeight.normal,
-                                fontSize: 12,
-                              ),
-                            ),
-                          ],
-                        ),
+                        ],
                       ),
                     ),
-                  ),
-                  Expanded(
-                    child: GestureDetector(
-                      onTap: () => setState(() => _activeTab = 1),
-                      child: Container(
-                        decoration: BoxDecoration(
-                          color: _activeTab == 1
-                              ? (isMav ? const Color(0xFF0057B8) : const Color(0xFF009EE3)).withValues(alpha: 0.35)
-                              : Colors.transparent,
-                          borderRadius: BorderRadius.circular(7),
-                          border: _activeTab == 1
-                              ? Border.all(
-                                  color: isMav ? const Color(0xFF38BDF8) : const Color(0xFF009EE3),
-                                  width: 1,
-                                )
-                              : null,
-                        ),
-                        alignment: Alignment.center,
-                        child: Row(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            Icon(
-                              isMav ? Icons.train : Icons.build_circle_outlined,
-                              size: 14,
-                              color: _activeTab == 1
-                                  ? (isMav ? Colors.cyanAccent : Colors.lightBlueAccent)
-                                  : Colors.white60,
-                            ),
-                            const SizedBox(width: 6),
-                            Text(
-                              isMav ? 'vagonWEB szerelvény' : 'HBweb műszaki adatok',
-                              style: TextStyle(
-                                color: _activeTab == 1 ? Colors.white : Colors.white60,
-                                fontWeight: _activeTab == 1 ? FontWeight.bold : FontWeight.normal,
-                                fontSize: 12,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                  ),
+                  ],
                 ],
               ),
             ),
-          ),
 
-          const Divider(height: 1, color: Colors.white12),
+            // Material 3 SegmentedButton Switcher (Menetrend vs Műszaki infó)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
+              child: SizedBox(
+                width: double.infinity,
+                child: SegmentedButton<int>(
+                  segments: [
+                    const ButtonSegment<int>(
+                      value: 0,
+                      icon: Icon(Icons.schedule, size: 16),
+                      label: Text('Menetrend', style: TextStyle(fontSize: 12)),
+                    ),
+                    ButtonSegment<int>(
+                      value: 1,
+                      icon: Icon(isMav ? Icons.train : Icons.build_circle_outlined, size: 16),
+                      label: Text(
+                        isMav ? 'vagonWEB szerelvény' : 'HBweb műszaki adatok',
+                        style: const TextStyle(fontSize: 12),
+                      ),
+                    ),
+                  ],
+                  selected: {_activeTab},
+                  onSelectionChanged: (Set<int> newSelection) {
+                    setState(() => _activeTab = newSelection.first);
+                  },
+                ),
+              ),
+            ),
 
-          // Content Area: Live Dynamic Schedule or Technical Tab
-          Expanded(
-            child: _activeTab == 1
-                ? VehicleTechnicalTabView(props: widget.props)
-                : _buildDynamicScheduleTab(
-                    scheduleAsync: scheduleAsync,
-                    badgeBg: badgeBg,
-                    delay: delay,
-                    delayBadgeColor: delayBadgeColor,
-                    delayLabel: delayLabel,
-                    vType: vType,
-                    tripId: tripId,
-                  ),
-          ),
-        ],
+            const Divider(height: 1),
+
+            // Content Area: Live Dynamic Schedule or Technical Tab
+            Expanded(
+              child: _activeTab == 1
+                  ? VehicleTechnicalTabView(props: widget.props)
+                  : _buildDynamicScheduleTab(
+                      theme: theme,
+                      scheduleAsync: scheduleAsync,
+                      badgeBg: badgeBg,
+                      delay: delay,
+                      delayBadgeColor: delayBadgeColor,
+                      delayLabel: delayLabel,
+                      vType: vType,
+                      tripId: tripId,
+                    ),
+            ),
+          ],
+        ),
       ),
     );
   }
 
   Widget _buildDynamicScheduleTab({
+    required ThemeData theme,
     required AsyncValue<List<TripStopSchedule>>? scheduleAsync,
     required Color badgeBg,
     required int delay,
@@ -391,12 +320,14 @@ class _VehicleDetailCardState extends ConsumerState<VehicleDetailCard> {
     required String tripId,
   }) {
     if (scheduleAsync == null) {
-      return const Center(
+      return Center(
         child: Padding(
-          padding: EdgeInsets.all(20),
+          padding: const EdgeInsets.all(20),
           child: Text(
             'Valós idejű GPS adatfolyam (statikus menetrendi adat nélkül)',
-            style: TextStyle(color: Colors.white54, fontSize: 12),
+            style: theme.textTheme.bodyMedium?.copyWith(
+              color: theme.colorScheme.onSurfaceVariant,
+            ),
             textAlign: TextAlign.center,
           ),
         ),
@@ -406,12 +337,14 @@ class _VehicleDetailCardState extends ConsumerState<VehicleDetailCard> {
     return scheduleAsync.when(
       data: (stops) {
         if (stops.isEmpty) {
-          return const Center(
+          return Center(
             child: Padding(
-              padding: EdgeInsets.all(20),
+              padding: const EdgeInsets.all(20),
               child: Text(
                 'A menetrendi megállók nem találhatók a helyi adatbázisban.',
-                style: TextStyle(color: Colors.white54, fontSize: 12),
+                style: theme.textTheme.bodyMedium?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
                 textAlign: TextAlign.center,
               ),
             ),
@@ -553,14 +486,13 @@ class _VehicleDetailCardState extends ConsumerState<VehicleDetailCard> {
 
         return Column(
           children: [
-            // Live Status Banner (BudapestGO / MÁV+ style)
+            // Live Status Banner (Material 3 surfaceContainerHigh)
             Container(
-              margin: const EdgeInsets.fromLTRB(14, 8, 14, 4),
+              margin: const EdgeInsets.fromLTRB(16, 8, 16, 4),
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
               decoration: BoxDecoration(
-                color: const Color(0xFF1E293B),
+                color: theme.colorScheme.surfaceContainerHigh,
                 borderRadius: BorderRadius.circular(10),
-                border: Border.all(color: Colors.white12),
               ),
               child: Row(
                 children: [
@@ -577,26 +509,21 @@ class _VehicleDetailCardState extends ConsumerState<VehicleDetailCard> {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Row(
-                          children: [
-                            Text(
-                              isAtStation
-                                  ? 'Állomáson: ${activeStop.stopName}'
-                                  : 'Következő: ${activeStop.stopName}',
-                              style: const TextStyle(
-                                color: Colors.white,
-                                fontWeight: FontWeight.bold,
-                                fontSize: 12,
-                              ),
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                          ],
+                        Text(
+                          isAtStation
+                              ? 'Állomáson: ${activeStop.stopName}'
+                              : 'Következő: ${activeStop.stopName}',
+                          style: const TextStyle(
+                            fontWeight: FontWeight.bold,
+                            fontSize: 12,
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
                         ),
                         Text(
                           '$arrivalCountdown • $delayLabel',
                           style: TextStyle(
-                            color: delay.abs() > 60 ? delayBadgeColor : const Color(0xFF38BDF8),
+                            color: delay.abs() > 60 ? delayBadgeColor : theme.colorScheme.primary,
                             fontSize: 10.5,
                             fontWeight: FontWeight.w600,
                           ),
@@ -606,14 +533,18 @@ class _VehicleDetailCardState extends ConsumerState<VehicleDetailCard> {
                   ),
                   const SizedBox(width: 6),
                   Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                    padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2.5),
                     decoration: BoxDecoration(
-                      color: Colors.black38,
-                      borderRadius: BorderRadius.circular(4),
+                      color: theme.colorScheme.secondaryContainer,
+                      borderRadius: BorderRadius.circular(5),
                     ),
                     child: Text(
                       '${activeIndex + 1}/${stops.length}',
-                      style: const TextStyle(color: Colors.white70, fontSize: 10),
+                      style: TextStyle(
+                        color: theme.colorScheme.onSecondaryContainer,
+                        fontSize: 10.5,
+                        fontWeight: FontWeight.bold,
+                      ),
                     ),
                   ),
                 ],
@@ -624,26 +555,26 @@ class _VehicleDetailCardState extends ConsumerState<VehicleDetailCard> {
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 6, 16, 4),
               child: Row(
-                children: const [
+                children: [
                   SizedBox(
                     width: 44,
                     child: Text(
                       'Érkezés',
                       style: TextStyle(
-                        color: Colors.white70,
+                        color: theme.colorScheme.onSurfaceVariant,
                         fontSize: 11,
                         fontStyle: FontStyle.italic,
                       ),
                       textAlign: TextAlign.right,
                     ),
                   ),
-                  SizedBox(width: 20),
+                  const SizedBox(width: 20),
                   SizedBox(
                     width: 48,
                     child: Text(
                       'Indulás',
                       style: TextStyle(
-                        color: Colors.white70,
+                        color: theme.colorScheme.onSurfaceVariant,
                         fontSize: 11,
                         fontStyle: FontStyle.italic,
                       ),
@@ -654,7 +585,7 @@ class _VehicleDetailCardState extends ConsumerState<VehicleDetailCard> {
               ),
             ),
 
-            // Timeline List of Stops (MÁV+ style)
+            // Timeline List of Stops
             Expanded(
               child: ListView.builder(
                 controller: _scrollController,
@@ -721,11 +652,10 @@ class _VehicleDetailCardState extends ConsumerState<VehicleDetailCard> {
                                     if (isDelayed)
                                       Text(
                                         _formatTime(schedArrDt),
-                                        style: const TextStyle(
-                                          color: Colors.white60,
+                                        style: TextStyle(
+                                          color: theme.colorScheme.onSurfaceVariant,
                                           fontSize: 10,
                                           decoration: TextDecoration.lineThrough,
-                                          decorationColor: Colors.white60,
                                         ),
                                       ),
                                     Text(
@@ -735,7 +665,9 @@ class _VehicleDetailCardState extends ConsumerState<VehicleDetailCard> {
                                             ? delayColor
                                             : (departedOnTime
                                                 ? const Color(0xFF22C55E)
-                                                : (isPassed ? Colors.white38 : Colors.white)),
+                                                : (isPassed
+                                                    ? theme.colorScheme.onSurfaceVariant.withValues(alpha: 0.5)
+                                                    : theme.colorScheme.onSurface)),
                                         fontSize: 13,
                                         fontWeight: FontWeight.bold,
                                       ),
@@ -757,7 +689,7 @@ class _VehicleDetailCardState extends ConsumerState<VehicleDetailCard> {
                                 bottom: isLast ? 25 : 0,
                                 width: 2,
                                 child: Container(
-                                  color: const Color(0xFF0077D4),
+                                  color: theme.colorScheme.primary,
                                 ),
                               ),
                               // Stop Dot
@@ -766,8 +698,8 @@ class _VehicleDetailCardState extends ConsumerState<VehicleDetailCard> {
                                 child: Container(
                                   width: 6,
                                   height: 6,
-                                  decoration: const BoxDecoration(
-                                    color: Colors.white,
+                                  decoration: BoxDecoration(
+                                    color: theme.colorScheme.onSurface,
                                     shape: BoxShape.circle,
                                   ),
                                 ),
@@ -777,25 +709,19 @@ class _VehicleDetailCardState extends ConsumerState<VehicleDetailCard> {
                                 Positioned(
                                   top: vehicleTop,
                                   child: Container(
-                                    width: 18,
-                                    height: 18,
                                     decoration: BoxDecoration(
-                                      color: const Color(0xFF0057B8),
-                                      borderRadius: BorderRadius.circular(3),
+                                      shape: BoxShape.circle,
                                       boxShadow: [
                                         BoxShadow(
-                                          color: Colors.black.withValues(alpha: 0.6),
-                                          blurRadius: 4,
+                                          color: Colors.black.withValues(alpha: 0.35),
+                                          blurRadius: 3,
                                           offset: const Offset(0, 1),
                                         ),
                                       ],
                                     ),
-                                    child: Center(
-                                      child: Icon(
-                                        getModeIconData(vType),
-                                        size: 11,
-                                        color: Colors.white,
-                                      ),
+                                    child: TransitModeCircleIcon(
+                                      mode: vType,
+                                      size: 18,
                                     ),
                                   ),
                                 ),
@@ -815,11 +741,10 @@ class _VehicleDetailCardState extends ConsumerState<VehicleDetailCard> {
                                     if (isDelayed)
                                       Text(
                                         _formatTime(schedDepDt),
-                                        style: const TextStyle(
-                                          color: Colors.white60,
+                                        style: TextStyle(
+                                          color: theme.colorScheme.onSurfaceVariant,
                                           fontSize: 10,
                                           decoration: TextDecoration.lineThrough,
-                                          decorationColor: Colors.white60,
                                         ),
                                       ),
                                     Text(
@@ -829,7 +754,9 @@ class _VehicleDetailCardState extends ConsumerState<VehicleDetailCard> {
                                             ? delayColor
                                             : ((departedOnTime || isFirst)
                                                 ? const Color(0xFF22C55E) // Green for on-time departure
-                                                : (isPassed ? Colors.white38 : Colors.white)),
+                                                : (isPassed
+                                                    ? theme.colorScheme.onSurfaceVariant.withValues(alpha: 0.5)
+                                                    : theme.colorScheme.onSurface)),
                                         fontSize: 13,
                                         fontWeight: FontWeight.bold,
                                       ),
@@ -848,7 +775,9 @@ class _VehicleDetailCardState extends ConsumerState<VehicleDetailCard> {
                                 child: Text(
                                   stop.stopName,
                                   style: TextStyle(
-                                    color: isPassed ? Colors.white54 : Colors.white,
+                                    color: isPassed
+                                        ? theme.colorScheme.onSurfaceVariant.withValues(alpha: 0.7)
+                                        : theme.colorScheme.onSurface,
                                     fontSize: 13,
                                     fontWeight: FontWeight.w600,
                                   ),
@@ -860,7 +789,7 @@ class _VehicleDetailCardState extends ConsumerState<VehicleDetailCard> {
                               Expanded(
                                 child: Container(
                                   height: 1,
-                                  color: const Color(0xFF374151),
+                                  color: theme.colorScheme.outlineVariant.withValues(alpha: 0.4),
                                 ),
                               ),
                               const SizedBox(width: 8),
@@ -879,7 +808,7 @@ class _VehicleDetailCardState extends ConsumerState<VehicleDetailCard> {
                                   border: Border.all(
                                     color: isGreenPlatform
                                         ? const Color(0xFF10B981) // Green border from MÁV+ app
-                                        : Colors.white70,
+                                        : theme.colorScheme.outline,
                                     width: 1.5,
                                   ),
                                 ),
@@ -888,7 +817,7 @@ class _VehicleDetailCardState extends ConsumerState<VehicleDetailCard> {
                                   style: TextStyle(
                                     color: isGreenPlatform
                                         ? const Color(0xFF10B981)
-                                        : Colors.white,
+                                        : theme.colorScheme.onSurface,
                                     fontWeight: FontWeight.w700,
                                     fontSize: 11.5,
                                   ),
@@ -907,10 +836,10 @@ class _VehicleDetailCardState extends ConsumerState<VehicleDetailCard> {
       loading: () => const Center(
         child: CircularProgressIndicator(strokeWidth: 2),
       ),
-      error: (_, __) => const Center(
+      error: (_, __) => Center(
         child: Text(
           'Menetrend betöltése sikertelen',
-          style: TextStyle(color: Colors.amber, fontSize: 12),
+          style: TextStyle(color: theme.colorScheme.error, fontSize: 12),
         ),
       ),
     );
