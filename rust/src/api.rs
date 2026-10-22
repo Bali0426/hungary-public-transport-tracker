@@ -23,7 +23,10 @@ struct EngineState {
     http_client: Client,
     cached_vehicles: Vec<UnifiedVehicle>,
     cached_trip_delays: HashMap<String, i32>,
+    cached_trip_schedules: HashMap<String, Vec<crate::static_db::repository::TripStopSchedule>>,
 }
+
+pub const DEFAULT_BKK_API_KEY: &str = "b4beebb5-1ecb-45fd-a83d-3374edb83a2b";
 
 static ENGINE_STATE: Lazy<RwLock<EngineState>> = Lazy::new(|| {
     let client = Client::builder()
@@ -34,11 +37,15 @@ static ENGINE_STATE: Lazy<RwLock<EngineState>> = Lazy::new(|| {
 
     RwLock::new(EngineState {
         repo: None,
-        bkk_api_key: std::env::var("BKK_API_KEY").ok(),
+        bkk_api_key: std::env::var("BKK_API_KEY")
+            .ok()
+            .filter(|k| !k.trim().is_empty())
+            .or_else(|| Some(DEFAULT_BKK_API_KEY.to_string())),
         mav_gtfs_rt_url: std::env::var("MAV_GTFS_RT_URL").ok(),
         http_client: client,
         cached_vehicles: Vec::new(),
         cached_trip_delays: HashMap::new(),
+        cached_trip_schedules: HashMap::new(),
     })
 });
 
@@ -56,14 +63,25 @@ pub fn init_engine(
     bkk_api_key: Option<String>,
     mav_gtfs_rt_url: Option<String>,
 ) -> Result<()> {
-    let repo = StaticTransitRepository::open(&sqlite_db_path)?;
     let mut guard = ENGINE_STATE.write().unwrap();
-    guard.repo = Some(repo);
-    if let Some(key) = bkk_api_key.filter(|k| !k.trim().is_empty()) {
-        guard.bkk_api_key = Some(key);
+    if !sqlite_db_path.trim().is_empty() {
+        if let Ok(repo) = StaticTransitRepository::open(&sqlite_db_path) {
+            guard.repo = Some(repo);
+        }
     }
-    if let Some(url) = mav_gtfs_rt_url.filter(|u| !u.trim().is_empty()) {
-        guard.mav_gtfs_rt_url = Some(url);
+    let key = bkk_api_key
+        .filter(|k| !k.trim().is_empty())
+        .or_else(|| std::env::var("BKK_API_KEY").ok())
+        .filter(|k| !k.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_BKK_API_KEY.to_string());
+    guard.bkk_api_key = Some(key);
+    if let Some(url) = mav_gtfs_rt_url {
+        let trimmed = url.trim();
+        guard.mav_gtfs_rt_url = if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        };
     }
     Ok(())
 }
@@ -104,11 +122,11 @@ pub async fn poll_live_vehicles_in_bbox(
     }
 
     let bkk_fut = async {
-        if let Some(ref key) = bkk_key {
-            fetch_bkk_live_vehicles(&client, key, repo.as_ref()).await
-        } else {
-            Ok((Vec::new(), HashMap::new()))
-        }
+        let key = bkk_key
+            .as_deref()
+            .filter(|k| !k.trim().is_empty())
+            .unwrap_or(DEFAULT_BKK_API_KEY);
+        fetch_bkk_live_vehicles(&client, key, repo.as_ref()).await
     };
 
     let mav_fut = fetch_mav_live_vehicles(&client, mav_url.as_deref(), Some(bbox));
@@ -117,14 +135,16 @@ pub async fn poll_live_vehicles_in_bbox(
 
     let mut combined_vehicles = Vec::new();
     let mut combined_delays = HashMap::new();
+    let mut combined_schedules = HashMap::new();
 
     if let Ok((bkk_v, bkk_d)) = bkk_res {
         combined_vehicles.extend(bkk_v);
         combined_delays.extend(bkk_d);
     }
-    if let Ok((mav_v, mav_d)) = mav_res {
+    if let Ok((mav_v, mav_d, mav_s)) = mav_res {
         combined_vehicles.extend(mav_v);
         combined_delays.extend(mav_d);
+        combined_schedules.extend(mav_s);
     }
 
     // If fetch failed or returned nothing, fall back to existing cache
@@ -139,6 +159,9 @@ pub async fn poll_live_vehicles_in_bbox(
         if !combined_vehicles.is_empty() {
             guard.cached_vehicles = combined_vehicles;
             guard.cached_trip_delays = combined_delays;
+        }
+        if !combined_schedules.is_empty() {
+            guard.cached_trip_schedules.extend(combined_schedules);
         }
     }
 
@@ -250,6 +273,29 @@ pub fn get_station_departure_board(
 
 /// Returns the scheduled stop sequence and departure times for a given trip_id.
 pub fn get_trip_schedule(trip_id: String) -> Result<Vec<crate::static_db::repository::TripStopSchedule>> {
+    // 1. Check in-memory cached schedules first (populated by MÁV+ GraphQL live feed)
+    {
+        let guard = ENGINE_STATE.read().unwrap();
+        if let Some(stops) = guard.cached_trip_schedules.get(&trip_id) {
+            if !stops.is_empty() {
+                return Ok(stops.clone());
+            }
+        }
+        let raw = trip_id
+            .strip_prefix("MAV:")
+            .or_else(|| trip_id.strip_prefix("BKK:"))
+            .unwrap_or(&trip_id);
+        let m_key = format!("MAV:{}", raw);
+        let b_key = format!("BKK:{}", raw);
+        for key in [m_key.as_str(), b_key.as_str(), raw] {
+            if let Some(stops) = guard.cached_trip_schedules.get(key) {
+                if !stops.is_empty() {
+                    return Ok(stops.clone());
+                }
+            }
+        }
+    }
+
     let (repo, client, bkk_key) = {
         let guard = ENGINE_STATE.read().unwrap();
         (
@@ -258,6 +304,8 @@ pub fn get_trip_schedule(trip_id: String) -> Result<Vec<crate::static_db::reposi
             guard.bkk_api_key.clone(),
         )
     };
+
+    // 2. Check bundled static SQLite database
     if let Some(ref r) = repo {
         if let Ok(local_stops) = r.get_trip_schedule(&trip_id) {
             if !local_stops.is_empty() {
@@ -266,14 +314,29 @@ pub fn get_trip_schedule(trip_id: String) -> Result<Vec<crate::static_db::reposi
         }
     }
 
-    // Fallback to live FUTÁR trip-details.json (covers MÁV trains and operative BKK trips)
+    let is_mav = trip_id.starts_with("MAV:");
+    let raw_tid = trip_id
+        .strip_prefix("MAV:")
+        .or_else(|| trip_id.strip_prefix("BKK:"))
+        .unwrap_or(&trip_id)
+        .to_string();
+
+    // 3. If MÁV train not in static DB, fetch directly from MÁV+ OTP2 GraphQL endpoint
+    if is_mav {
+        let mav_res = TOKIO_RT.block_on(async {
+            crate::gtfs_rt::mav::fetch_mav_single_trip_schedule(&client, &raw_tid).await.ok()
+        });
+        if let Some(stops) = mav_res {
+            if !stops.is_empty() {
+                let mut guard = ENGINE_STATE.write().unwrap();
+                guard.cached_trip_schedules.insert(trip_id.clone(), stops.clone());
+                return Ok(stops);
+            }
+        }
+    }
+
+    // 4. Fallback to live FUTÁR trip-details.json (covers operative BKK trips)
     if let Some(key) = bkk_key {
-        let raw_tid = trip_id
-            .strip_prefix("MAV:")
-            .or_else(|| trip_id.strip_prefix("BKK:"))
-            .unwrap_or(&trip_id)
-            .to_string();
-        let is_mav = trip_id.starts_with("MAV:");
         let url = format!(
             "https://go.bkk.hu/api/query/v1/ws/otp/api/where/trip-details.json?key={}&tripId=BKK_{}",
             key, raw_tid
@@ -299,23 +362,60 @@ pub fn get_trip_schedule(trip_id: String) -> Result<Vec<crate::static_db::reposi
                     .and_then(|n| n.as_str())
                     .unwrap_or(stop_id)
                     .to_string();
-                let ts = st
-                    .get("predictedDepartureTime")
-                    .or_else(|| st.get("departureTime"))
-                    .or_else(|| st.get("predictedArrivalTime"))
-                    .or_else(|| st.get("arrivalTime"))
-                    .and_then(|v| v.as_i64())
-                    .unwrap_or(0);
-                let dep_fmt = if ts > 0 {
+
+                let dep_ts = st.get("departureTime").and_then(|v| v.as_i64()).unwrap_or(0);
+                let pred_dep_ts = st.get("predictedDepartureTime").and_then(|v| v.as_i64()).unwrap_or(0);
+                let arr_ts = st.get("arrivalTime").and_then(|v| v.as_i64()).unwrap_or(0);
+                let pred_arr_ts = st.get("predictedArrivalTime").and_then(|v| v.as_i64()).unwrap_or(0);
+
+                let dep_fmt = if dep_ts > 0 {
                     use chrono::TimeZone;
-                    if let Some(dt) = chrono::Local.timestamp_opt(ts, 0).single() {
-                        dt.format("%H:%M").to_string()
-                    } else {
-                        "--:--".to_string()
-                    }
+                    chrono::Local.timestamp_opt(dep_ts, 0).single().map(|dt| dt.format("%H:%M").to_string()).unwrap_or_else(|| "--:--".to_string())
+                } else if pred_dep_ts > 0 {
+                    use chrono::TimeZone;
+                    chrono::Local.timestamp_opt(pred_dep_ts, 0).single().map(|dt| dt.format("%H:%M").to_string()).unwrap_or_else(|| "--:--".to_string())
                 } else {
                     "--:--".to_string()
                 };
+
+                let pred_dep_fmt = if pred_dep_ts > 0 && pred_dep_ts != dep_ts {
+                    use chrono::TimeZone;
+                    chrono::Local.timestamp_opt(pred_dep_ts, 0).single().map(|dt| dt.format("%H:%M").to_string())
+                } else {
+                    None
+                };
+
+                let arr_fmt = if arr_ts > 0 {
+                    use chrono::TimeZone;
+                    chrono::Local.timestamp_opt(arr_ts, 0).single().map(|dt| dt.format("%H:%M").to_string())
+                } else {
+                    None
+                };
+
+                let pred_arr_fmt = if pred_arr_ts > 0 && pred_arr_ts != arr_ts {
+                    use chrono::TimeZone;
+                    chrono::Local.timestamp_opt(pred_arr_ts, 0).single().map(|dt| dt.format("%H:%M").to_string())
+                } else {
+                    None
+                };
+
+                let delay_sec = if pred_dep_ts > 0 && dep_ts > 0 {
+                    (pred_dep_ts - dep_ts) as i32
+                } else if pred_arr_ts > 0 && arr_ts > 0 {
+                    (pred_arr_ts - arr_ts) as i32
+                } else {
+                    0
+                };
+
+                let stop_obj = stops_ref.get(stop_id);
+                let plat_code = stop_obj
+                    .and_then(|s| s.get("platformCode"))
+                    .and_then(|v| v.as_str())
+                    .filter(|p| !p.trim().is_empty())
+                    .map(|s| s.to_string());
+                let s_lat = stop_obj.and_then(|s| s.get("lat")).and_then(|v| v.as_f64());
+                let s_lon = stop_obj.and_then(|s| s.get("lon")).and_then(|v| v.as_f64());
+
                 out.push(crate::static_db::repository::TripStopSchedule {
                     stop_sequence: seq,
                     stop_id: stop_id.to_string(),
@@ -326,12 +426,21 @@ pub fn get_trip_schedule(trip_id: String) -> Result<Vec<crate::static_db::reposi
                     } else {
                         "BKK".to_string()
                     },
+                    platform_code: plat_code,
+                    arrival_time: arr_fmt,
+                    lat: s_lat,
+                    lon: s_lon,
+                    predicted_departure_time: pred_dep_fmt,
+                    predicted_arrival_time: pred_arr_fmt,
+                    delay_seconds: delay_sec,
                 });
             }
             Some(out)
         });
         if let Some(stops) = live_stops {
             if !stops.is_empty() {
+                let mut guard = ENGINE_STATE.write().unwrap();
+                guard.cached_trip_schedules.insert(trip_id.clone(), stops.clone());
                 return Ok(stops);
             }
         }

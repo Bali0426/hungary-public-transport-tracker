@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:hungary_public_transport_tracker/bridge/bridge_generated.dart';
 import 'package:hungary_public_transport_tracker/models/vehicle_technical_data.dart';
 import 'package:hungary_public_transport_tracker/providers/vehicle_detail_provider.dart';
 import 'package:hungary_public_transport_tracker/services/hbweb_service.dart';
@@ -225,6 +226,36 @@ void main() {
       expect(find.textContaining('Tokaj'), findsWidgets);
       expect(find.textContaining('vagonWEB'), findsWidgets);
       expect(find.text('Menetirány'), findsOneWidget);
+    });
+  });
+
+  group('TripStopSchedule Real-Time Delay Tests', () {
+    test('deserializes real platformCode, predicted times and stop delay correctly', () {
+      final json = {
+        'stop_sequence': 3,
+        'stop_id': 'MAV:1:28518948_2',
+        'stop_name': 'Székesfehérvár',
+        'departure_time': '16:17',
+        'operator': 'MAV',
+        'platform_code': '9',
+        'arrival_time': '16:15',
+        'lat': 47.1895,
+        'lon': 18.4231,
+        'predicted_departure_time': '16:39',
+        'predicted_arrival_time': '16:37',
+        'delay_seconds': 1320,
+      };
+
+      final stop = TripStopSchedule.fromJson(json);
+
+      expect(stop.stopSequence, equals(3));
+      expect(stop.stopName, equals('Székesfehérvár'));
+      expect(stop.platformCode, equals('9'));
+      expect(stop.departureTime, equals('16:17'));
+      expect(stop.predictedDepartureTime, equals('16:39'));
+      expect(stop.delaySeconds, equals(1320));
+      expect(stop.lat, equals(47.1895));
+      expect(stop.lon, equals(18.4231));
     });
   });
 }

@@ -13,3 +13,6 @@ assets/db/transit_static.db
 .vscode/
 .idea/
 *.iml
+# Widget Preview related
+.widget_preview/
+graphify-out/

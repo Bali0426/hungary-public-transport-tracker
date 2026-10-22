@@ -337,7 +337,11 @@ impl StaticTransitRepository {
                 st.stop_id,
                 s.name,
                 st.departure_time,
-                s.operator_type
+                s.operator_type,
+                s.platform_code,
+                st.arrival_seconds,
+                s.lat,
+                s.lon
             FROM stop_times st
             JOIN stops s ON s.id = st.stop_id
             WHERE st.trip_id = ?1
@@ -345,12 +349,22 @@ impl StaticTransitRepository {
         "#)?;
 
         let rows = stmt.query_map(params![trip_id], |row| {
+            let dep_time: String = row.get(3)?;
+            let arr_sec: Option<i32> = row.get(6).ok();
+            let arr_time = arr_sec.map(|s| format_hhmm(s, &dep_time));
             Ok(TripStopSchedule {
                 stop_sequence: row.get(0)?,
                 stop_id: row.get(1)?,
                 stop_name: row.get(2)?,
-                departure_time: row.get(3)?,
+                departure_time: dep_time,
                 operator: row.get(4)?,
+                platform_code: row.get(5)?,
+                arrival_time: arr_time,
+                lat: row.get(7).ok(),
+                lon: row.get(8).ok(),
+                predicted_departure_time: None,
+                predicted_arrival_time: None,
+                delay_seconds: 0,
             })
         })?;
 
@@ -363,12 +377,22 @@ impl StaticTransitRepository {
         if list.is_empty() {
             if let Some((base_id, _)) = trip_id.split_once('-') {
                 let rows2 = stmt.query_map(params![base_id], |row| {
+                    let dep_time: String = row.get(3)?;
+                    let arr_sec: Option<i32> = row.get(6).ok();
+                    let arr_time = arr_sec.map(|s| format_hhmm(s, &dep_time));
                     Ok(TripStopSchedule {
                         stop_sequence: row.get(0)?,
                         stop_id: row.get(1)?,
                         stop_name: row.get(2)?,
-                        departure_time: row.get(3)?,
+                        departure_time: dep_time,
                         operator: row.get(4)?,
+                        platform_code: row.get(5)?,
+                        arrival_time: arr_time,
+                        lat: row.get(7).ok(),
+                        lon: row.get(8).ok(),
+                        predicted_departure_time: None,
+                        predicted_arrival_time: None,
+                        delay_seconds: 0,
                     })
                 })?;
                 for r in rows2 {
@@ -394,9 +418,19 @@ pub struct TripStopSchedule {
     pub stop_name: String,
     pub departure_time: String,
     pub operator: String,
+    pub platform_code: Option<String>,
+    pub arrival_time: Option<String>,
+    pub lat: Option<f64>,
+    pub lon: Option<f64>,
+    #[serde(default)]
+    pub predicted_departure_time: Option<String>,
+    #[serde(default)]
+    pub predicted_arrival_time: Option<String>,
+    #[serde(default)]
+    pub delay_seconds: i32,
 }
 
-fn format_hhmm(seconds: i32, fallback: &str) -> String {
+pub fn format_hhmm(seconds: i32, fallback: &str) -> String {
     if seconds < 0 {
         return fallback.to_string();
     }

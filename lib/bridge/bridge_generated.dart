@@ -169,6 +169,13 @@ class TripStopSchedule {
   final String stopName;
   final String departureTime;
   final String operator;
+  final String? arrivalTime;
+  final String? platformCode;
+  final double? lat;
+  final double? lon;
+  final String? predictedDepartureTime;
+  final String? predictedArrivalTime;
+  final int delaySeconds;
 
   const TripStopSchedule({
     required this.stopSequence,
@@ -176,6 +183,13 @@ class TripStopSchedule {
     required this.stopName,
     required this.departureTime,
     required this.operator,
+    this.arrivalTime,
+    this.platformCode,
+    this.lat,
+    this.lon,
+    this.predictedDepartureTime,
+    this.predictedArrivalTime,
+    this.delaySeconds = 0,
   });
 
   factory TripStopSchedule.fromJson(Map<String, dynamic> json) {
@@ -185,6 +199,13 @@ class TripStopSchedule {
       stopName: json['stop_name'] as String,
       departureTime: json['departure_time'] as String,
       operator: json['operator'] as String? ?? 'BKK',
+      arrivalTime: json['arrival_time'] as String?,
+      platformCode: json['platform_code'] as String?,
+      lat: (json['lat'] as num?)?.toDouble(),
+      lon: (json['lon'] as num?)?.toDouble(),
+      predictedDepartureTime: json['predicted_departure_time'] as String?,
+      predictedArrivalTime: json['predicted_arrival_time'] as String?,
+      delaySeconds: (json['delay_seconds'] as num?)?.toInt() ?? 0,
     );
   }
 }

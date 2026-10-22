@@ -38,12 +38,24 @@ pub async fn fetch_bkk_live_vehicles(
                             if let Some(raw_trip_id) = tu.trip.trip_id {
                                 let full_trip_id = format!("BKK:{}", raw_trip_id);
                                 let delay = tu.delay.or_else(|| {
-                                    tu.stop_time_update.first().and_then(|stu| {
-                                        stu.departure
-                                            .as_ref()
-                                            .and_then(|d| d.delay)
-                                            .or_else(|| stu.arrival.as_ref().and_then(|a| a.delay))
-                                    })
+                                    // Search for first non-zero delay or last reported stop delay
+                                    tu.stop_time_update
+                                        .iter()
+                                        .filter_map(|stu| {
+                                            stu.departure
+                                                .as_ref()
+                                                .and_then(|d| d.delay)
+                                                .or_else(|| stu.arrival.as_ref().and_then(|a| a.delay))
+                                        })
+                                        .find(|&d| d != 0)
+                                        .or_else(|| {
+                                            tu.stop_time_update.last().and_then(|stu| {
+                                                stu.departure
+                                                    .as_ref()
+                                                    .and_then(|d| d.delay)
+                                                    .or_else(|| stu.arrival.as_ref().and_then(|a| a.delay))
+                                            })
+                                        })
                                 }).unwrap_or(0);
                                 trip_delays.insert(full_trip_id, delay);
                             }
@@ -217,7 +229,7 @@ pub fn decode_bkk_vehicle_positions_bytes(
                 }
             }
 
-            vehicle_type = match route_type {
+            let matched_type = match route_type {
                 Some(0) => "tram",
                 Some(1) => "metro",
                 Some(2) => "train",
@@ -225,21 +237,22 @@ pub fn decode_bkk_vehicle_positions_bytes(
                 Some(4) => "boat",
                 Some(11) => "trolley",
                 Some(109) => "suburban_rail", // HÉV
-                _ => {
-                    let lower = line_name.to_lowercase();
-                    if lower.starts_with('m') && lower.len() <= 3 {
-                        "metro"
-                    } else if lower.starts_with('h')
-                        && lower.len() <= 3
-                        && lower[1..].chars().all(|c| c.is_ascii_digit())
-                    {
-                        "suburban_rail"
-                    } else {
-                        "bus"
-                    }
-                }
+                _ => classify_bkk_vehicle_type(r_str, &line_name),
+            };
+
+            // If color wasn't resolved from DB, assign authentic BKK default mode colors
+            if route_type.is_none() {
+                route_color = match matched_type {
+                    "tram" => "D97706".to_string(),
+                    "metro" => "2563EB".to_string(),
+                    "trolley" => "DC2626".to_string(),
+                    "suburban_rail" => "16A34A".to_string(),
+                    "boat" => "7C3AED".to_string(),
+                    _ => "0284C7".to_string(),
+                };
             }
-            .to_string();
+
+            vehicle_type = matched_type.to_string();
         }
 
         let final_id = match operator {
@@ -266,8 +279,86 @@ pub fn decode_bkk_vehicle_positions_bytes(
             timestamp: vp.timestamp.unwrap_or(feed_ts),
             route_color,
             vehicle_type,
+            trip_short_name: None,
+            delay_cause: None,
         });
     }
 
     Ok(results)
 }
+
+/// Robust heuristic fallback classifier when static GTFS metadata is uninitialized or missing.
+pub fn classify_bkk_vehicle_type(route_id: &str, line_name: &str) -> &'static str {
+    let r = route_id.trim();
+    let l = line_name.trim();
+    let lower_l = l.to_lowercase();
+
+    // 1. Check route_id if available (BKK standard 4-digit route encoding)
+    if (r.starts_with('3') && r.len() == 4 && r.chars().all(|c| c.is_ascii_digit()))
+        || r.starts_with("N3")
+        || r.starts_with("3")
+    {
+        // 3000-3999 are Budapest trams
+        if r.len() == 4 && r.chars().all(|c| c.is_ascii_digit()) {
+            return "tram";
+        }
+    }
+    if r.starts_with('4') && r.len() == 4 && r.chars().all(|c| c.is_ascii_digit()) {
+        return "trolley";
+    }
+    if r.starts_with('5') && r.len() == 4 && r.chars().all(|c| c.is_ascii_digit()) {
+        return "metro";
+    }
+    if r.starts_with('H') || r.starts_with("80") {
+        return "suburban_rail";
+    }
+    if r.starts_with('D') || r == "8140" {
+        return "boat";
+    }
+
+    // 2. Check line_name
+    if lower_l.starts_with('m')
+        && lower_l.len() <= 3
+        && lower_l[1..].chars().all(|c| c.is_ascii_digit())
+    {
+        return "metro";
+    }
+    if lower_l.starts_with('h')
+        && lower_l.len() <= 3
+        && lower_l[1..].chars().all(|c| c.is_ascii_digit())
+    {
+        return "suburban_rail";
+    }
+    if lower_l.starts_with('d') && lower_l.len() <= 3 {
+        return "boat";
+    }
+
+    // Numeric line names
+    if let Ok(num) = l.parse::<i32>() {
+        if (70..=83).contains(&num) {
+            return "trolley";
+        }
+        if matches!(
+            num,
+            1 | 2 | 3 | 4 | 6 | 12 | 14 | 17 | 19 | 23 | 24 | 28 | 37 | 41 | 42 | 47 | 48 | 49 | 50 | 56 | 59 | 60 | 61 | 62 | 69
+        ) {
+            return "tram";
+        }
+    }
+
+    // Tram lines with alphanumeric variants (e.g. 1A, 2B, 4-6, 28A, 37A, 56A, 59A, 59B, 62A)
+    if matches!(
+        l,
+        "1A" | "2B" | "4-6" | "28A" | "37A" | "56A" | "59A" | "59B" | "62A"
+    ) {
+        return "tram";
+    }
+
+    // Trolley variants (e.g. 74A, 75A, 80A, 82A)
+    if matches!(l, "74A" | "75A" | "80A" | "82A") {
+        return "trolley";
+    }
+
+    "bus"
+}
+

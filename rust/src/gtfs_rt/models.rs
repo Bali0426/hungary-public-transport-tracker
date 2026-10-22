@@ -41,6 +41,10 @@ pub struct UnifiedVehicle {
     pub timestamp: u64,
     pub route_color: String,
     pub vehicle_type: String, // "bus", "tram", "metro", "trolley", "train", "suburban_rail", "boat", "other"
+    #[serde(default)]
+    pub trip_short_name: Option<String>,
+    #[serde(default)]
+    pub delay_cause: Option<String>,
 }
 
 /// Geographic bounding box used to filter vehicles and stops to the active MapLibre viewport.

@@ -185,6 +185,10 @@ pub fn vehicles_to_geojson(vehicles: &[UnifiedVehicle]) -> String {
                     "trip_id": v.trip_id,
                     "route_id": v.route_id,
                     "line_name": v.line_name,
+                    "trip_short_name": v.trip_short_name,
+                    "delay_cause": v.delay_cause,
+                    "speed_mps": v.speed_mps,
+                    "speed_kmh": v.speed_mps.map(|s| (s * 3.6).round() as i32),
                     "destination": v.destination,
                     "bearing": v.bearing,
                     "delay_seconds": v.delay_seconds,
@@ -193,7 +197,9 @@ pub fn vehicles_to_geojson(vehicles: &[UnifiedVehicle]) -> String {
                     "delay_color": delay_color,
                     "route_color": format!("#{}", v.route_color.trim_start_matches('#')),
                     "timestamp": v.timestamp,
-                    "vehicle_type": v.vehicle_type
+                    "vehicle_type": v.vehicle_type,
+                    "lat": v.lat,
+                    "lon": v.lon
                 }
             })
         })

@@ -126,6 +126,16 @@ mod tests {
                         *type_counts.entry(v.vehicle_type.clone()).or_insert(0) += 1;
                     }
                     println!("Vehicle type counts with static DB: {:?}", type_counts);
+
+                    // Test without static DB as well to verify fallback classifier
+                    let decoded_no_db = decode_bkk_vehicle_positions_bytes(&bytes, &delays, None).unwrap();
+                    let mut no_db_types = HashMap::new();
+                    for v in &decoded_no_db {
+                        *no_db_types.entry(v.vehicle_type.clone()).or_insert(0) += 1;
+                    }
+                    println!("Vehicle type counts WITHOUT static DB: {:?}", no_db_types);
+                    assert!(no_db_types.get("tram").copied().unwrap_or(0) > 200, "Trams must be classified even without DB");
+                    assert!(no_db_types.get("trolley").copied().unwrap_or(0) > 80, "Trolleys must be classified even without DB");
                     let mut op_counts = HashMap::new();
                     for v in &vehicles {
                         *op_counts.entry(v.operator.as_str()).or_insert(0) += 1;
