@@ -6,7 +6,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::gtfs_rt::models::{BoundingBox, Operator, UnifiedDeparture, UnifiedVehicle};
 use crate::gtfs_rt::proto::FeedMessage;
-use crate::static_db::repository::{clean_station_name, format_hhmm, TripStopSchedule};
+use crate::static_db::repository::{
+    clean_station_name, format_hhmm, normalize_mav_otp2_id, normalize_station_core_name,
+    TripStopSchedule,
+};
 
 pub const EMMA_GRAPHQL_URL: &str =
     "https://mavplusz.hu/otp2-backend/otp/routers/default/index/graphql";
@@ -719,6 +722,11 @@ pub async fn fetch_mav_single_trip_schedule(
     raw_trip_id: &str,
 ) -> Result<Vec<TripStopSchedule>> {
     let clean_id = raw_trip_id.strip_prefix("MAV:").unwrap_or(raw_trip_id);
+    let query_id = if clean_id.starts_with("1:") {
+        clean_id.to_string()
+    } else {
+        format!("1:{}", clean_id)
+    };
     let query = format!(
         r#"{{
           trip(id: "{}") {{
@@ -739,7 +747,7 @@ pub async fn fetch_mav_single_trip_schedule(
             }}
           }}
         }}"#,
-        clean_id
+        query_id
     );
 
     let resp = client
@@ -831,25 +839,166 @@ pub async fn fetch_mav_single_trip_schedule(
     Ok(list)
 }
 
+/// Queries the exact physical rail geometry for a MÁV trip from OTP2 GraphQL.
+pub async fn fetch_mav_trip_geometry(
+    client: &Client,
+    trip_id: &str,
+) -> Result<Vec<(f64, f64)>> {
+    let clean_id = trip_id.strip_prefix("MAV:").unwrap_or(trip_id);
+    let query_id = if clean_id.starts_with("1:") {
+        clean_id.to_string()
+    } else {
+        format!("1:{}", clean_id)
+    };
+    let query = format!(
+        r#"{{
+          trip(id: "{}") {{
+            pattern {{
+              geometry {{
+                lat
+                lon
+              }}
+            }}
+          }}
+        }}"#,
+        query_id
+    );
+
+    let resp = client
+        .post(EMMA_GRAPHQL_URL)
+        .header("Content-Type", "application/json")
+        .header("Origin", "https://mavplusz.hu")
+        .header("Referer", "https://mavplusz.hu/")
+        .json(&GraphQlRequest { query })
+        .send()
+        .await
+        .context("Failed to query MÁV trip geometry")?;
+
+    if !resp.status().is_success() {
+        anyhow::bail!("MÁV OTP2 trip geometry query returned HTTP {}", resp.status());
+    }
+
+    let body: serde_json::Value = resp.json().await?;
+    let geom_arr = body
+        .get("data")
+        .and_then(|d| d.get("trip"))
+        .and_then(|t| t.get("pattern"))
+        .and_then(|p| p.get("geometry"))
+        .and_then(|g| g.as_array());
+
+    let Some(points) = geom_arr else {
+        return Ok(Vec::new());
+    };
+
+    let mut coords = Vec::with_capacity(points.len());
+    for pt in points {
+        if let (Some(lat), Some(lon)) = (
+            pt.get("lat").and_then(|v| v.as_f64()),
+            pt.get("lon").and_then(|v| v.as_f64()),
+        ) {
+            coords.push((lat, lon));
+        }
+    }
+
+    Ok(coords)
+}
+
+/// Recursively/iteratively strips transit prefixes like STOP:, GROUP:, HUB:, MAV:, BKK:
+pub fn strip_transit_prefixes(mut s: &str) -> &str {
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for prefix in &["STOP:", "GROUP:", "HUB:", "MAV:", "BKK:"] {
+            if let Some(stripped) = s.strip_prefix(prefix) {
+                s = stripped;
+                changed = true;
+            }
+        }
+    }
+    s
+}
+
 /// Sync mapper for known major railway stations (e.g. MAV_005510009 Keleti, etc.)
 pub fn resolve_mav_otp2_stop_id_sync(raw_id: &str) -> Option<&'static str> {
-    let trimmed = raw_id.trim();
-    let unprefix = trimmed
-        .strip_prefix("STOP:")
-        .unwrap_or(trimmed)
-        .strip_prefix("MAV:")
-        .unwrap_or(trimmed)
-        .strip_prefix("HUB:")
-        .unwrap_or(trimmed);
+    let unprefix = strip_transit_prefixes(raw_id.trim());
+
+    // Extract station name component if formatted as <name>:<lat>:<lon>
+    let name_candidate = if unprefix.contains(':') && !unprefix.starts_with("1:") {
+        let parts: Vec<&str> = unprefix.split(':').collect();
+        parts.first().copied().unwrap_or(unprefix)
+    } else {
+        unprefix
+    };
+
+    let lower = name_candidate.to_lowercase();
+    let core = normalize_station_core_name(name_candidate);
+
+    // Check by name substrings / core station names first (handles GROUP:Nyugati..., "Nyugati pályaudvar M", etc.)
+    if lower.contains("nyugati") {
+        return Some("1:005510033_0");
+    } else if lower.contains("keleti") {
+        return Some("1:005510017_0");
+    } else if (lower.contains("déli") || lower.contains("deli")) && !lower.contains("szőny") && !lower.contains("szony") {
+        return Some("1:005501016_0");
+    } else if lower.contains("kelenföld") || lower.contains("kelenfold") {
+        return Some("1:005501024_0");
+    } else if lower.contains("kőbánya-kispest") || lower.contains("kobanya-kispest") {
+        return Some("1:005510173_0");
+    } else if lower.contains("zugló") || lower.contains("zuglo") {
+        return Some("1:005510090_0");
+    } else if lower.contains("ferihegy") && !lower.contains("vecsés") && !lower.contains("market central") && !lower.contains("ferihegyi út") {
+        return Some("1:005513615_0");
+    } else if lower.contains("rákosrendező") || lower.contains("rakosrendezo") {
+        return Some("1:005510082_0");
+    } else if lower.contains("rákospalota-újpest") || lower.contains("rakospalota-ujpest") {
+        return Some("1:005510140_0");
+    } else if lower.contains("rákoshegy") || lower.contains("rakoshegy") {
+        return Some("1:005511528_0");
+    } else if lower.contains("rákosliget") || lower.contains("rakosliget") {
+        return Some("1:005511080_0");
+    } else if lower.contains("rákoscsaba-újtelep") || lower.contains("rakoscsaba-ujtelep") {
+        return Some("1:005511098_0");
+    } else if lower.contains("rákoscsaba") || lower.contains("rakoscsaba") {
+        return Some("1:005511106_0");
+    } else if lower.contains("rákoskert") || lower.contains("rakoskert") {
+        return Some("1:005541640_0");
+    } else if core == "rákos" || core == "rakos" {
+        return Some("1:005510074_0");
+    } else if lower.contains("ferencváros") || lower.contains("ferencvaros") {
+        return Some("1:005510041_0");
+    } else if lower.contains("kőbánya felső") || lower.contains("kobanya felso") {
+        return Some("1:005510066_0");
+    } else if lower.contains("kőbánya alsó") || lower.contains("kobanya also") {
+        return Some("1:005510157_0");
+    }
+
+    if unprefix.starts_with("1:0055") {
+        if unprefix.starts_with("1:005510033") {
+            return Some("1:005510033_0");
+        } else if unprefix.starts_with("1:005510017") {
+            return Some("1:005510017_0");
+        } else if unprefix.starts_with("1:005501016") {
+            return Some("1:005501016_0");
+        } else if unprefix.starts_with("1:005501024") {
+            return Some("1:005501024_0");
+        } else if unprefix.starts_with("1:005510090") {
+            return Some("1:005510090_0");
+        } else if unprefix.starts_with("1:005510173") {
+            return Some("1:005510173_0");
+        } else if unprefix.starts_with("1:005513615") || unprefix.starts_with("1:005510256") {
+            return Some("1:005513615_0");
+        }
+    }
 
     match unprefix {
-        // Major Budapest railway hubs explicitly noted in requirements
-        "MAV_005510009" | "005510009" => Some("1:005510017_0"), // Keleti
-        "MAV_005510017" => Some("1:005510033_0"),              // Nyugati
-        "MAV_005510025" | "005510025" => Some("1:005501016_0"), // Déli
-        "MAV_005510058" | "005510058" => Some("1:005501024_0"), // Kelenföld
+        // Major Budapest railway hubs explicitly noted in requirements / GTFS IDs
+        "MAV_005510009" | "005510009" | "000008" | "000044" | "000045" | "000046" => Some("1:005510017_0"), // Keleti
+        "MAV_005510017" | "005510017" | "000153" | "001104" => Some("1:005510033_0"), // Nyugati
+        "MAV_005510025" | "005510025" | "000185" | "000190" => Some("1:005501016_0"), // Déli
+        "MAV_005510058" | "005510058" | "000305" | "000028" | "000029" | "000030" | "000031" => Some("1:005501024_0"), // Kelenföld
         "MAV_005510090" | "005510090" => Some("1:005510090_0"), // Zugló
         "MAV_005510173" | "005510173" => Some("1:005510173_0"), // Kőbánya-Kispest
+        "MAV_005510256" | "005510256" | "MAV_005513615" | "005513615" | "000039" | "000040" => Some("1:005513615_0"), // Ferihegy
         _ => None,
     }
 }
@@ -860,48 +1009,76 @@ pub async fn resolve_mav_otp2_stop_id(client: &Client, raw_id: &str) -> String {
         return mapped.to_string();
     }
 
-    let trimmed = raw_id.trim();
-    let unprefix = trimmed
-        .strip_prefix("STOP:")
-        .unwrap_or(trimmed)
-        .strip_prefix("MAV:")
-        .unwrap_or(trimmed)
-        .strip_prefix("HUB:")
-        .unwrap_or(trimmed);
+    let unprefix = strip_transit_prefixes(raw_id.trim());
 
     if unprefix.starts_with("1:") {
-        return unprefix.to_string();
+        return normalize_mav_otp2_id(unprefix);
     }
 
-    let search_name = if unprefix.starts_with("GROUP:") {
+    let search_name = if unprefix.contains(':') {
         let parts: Vec<&str> = unprefix.split(':').collect();
-        if parts.len() >= 2 { parts[1] } else { unprefix }
+        parts.first().copied().unwrap_or(unprefix)
     } else {
         unprefix
     };
 
     let search_clean = clean_station_name(search_name);
-    let search_query = format!(
-        r#"{{ stops(name: "{}") {{ gtfsId name }} }}"#,
-        search_clean
-    );
+    let target_core = normalize_station_core_name(search_name);
+    let mut search_queries = vec![search_clean.clone()];
+    if !search_clean.starts_with("Budapest") {
+        search_queries.push(format!("Budapest-{}", search_clean));
+    }
+    let lower = search_clean.to_lowercase();
+    if lower.contains("pályaudvar") || lower.contains("vasútállomás") {
+        let stripped = search_clean
+            .replace("pályaudvar", "")
+            .replace("vasútállomás", "")
+            .trim()
+            .to_string();
+        if !stripped.is_empty() {
+            search_queries.push(stripped.clone());
+            if !stripped.starts_with("Budapest") {
+                search_queries.push(format!("Budapest-{}", stripped));
+            }
+        }
+    }
 
-    let resp = client
-        .post(EMMA_GRAPHQL_URL)
-        .header("Content-Type", "application/json")
-        .header("Origin", "https://mavplusz.hu")
-        .header("Referer", "https://mavplusz.hu/")
-        .json(&GraphQlRequest { query: search_query })
-        .send()
-        .await;
+    for query_name in search_queries {
+        let search_query = format!(
+            r#"{{ stops(name: "{}") {{ gtfsId name }} }}"#,
+            query_name
+        );
 
-    if let Ok(r) = resp {
-        if let Ok(body) = r.json::<serde_json::Value>().await {
-            if let Some(arr) = body.get("data").and_then(|d| d.get("stops")).and_then(|s| s.as_array()) {
-                for item in arr {
-                    if let Some(gid) = item.get("gtfsId").and_then(|g| g.as_str()) {
-                        if gid.starts_with("1:") {
-                            return gid.to_string();
+        let resp = client
+            .post(EMMA_GRAPHQL_URL)
+            .header("Content-Type", "application/json")
+            .header("Origin", "https://mavplusz.hu")
+            .header("Referer", "https://mavplusz.hu/")
+            .json(&GraphQlRequest { query: search_query })
+            .send()
+            .await;
+
+        if let Ok(r) = resp {
+            if let Ok(body) = r.json::<serde_json::Value>().await {
+                if let Some(arr) = body.get("data").and_then(|d| d.get("stops")).and_then(|s| s.as_array()) {
+                    // First pass: exact normalized core name match on a heavy rail stop (1:0055...)
+                    for item in arr {
+                        let gid = item.get("gtfsId").and_then(|g| g.as_str()).unwrap_or("");
+                        let sname = item.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                        if gid.starts_with("1:0055") && normalize_station_core_name(sname) == target_core {
+                            return normalize_mav_otp2_id(gid);
+                        }
+                    }
+                    // Second pass: prefix match on a heavy rail stop
+                    for item in arr {
+                        let gid = item.get("gtfsId").and_then(|g| g.as_str()).unwrap_or("");
+                        let sname = item.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                        let item_core = normalize_station_core_name(sname);
+                        if gid.starts_with("1:0055")
+                            && !target_core.is_empty()
+                            && (item_core.starts_with(&target_core) || target_core.starts_with(&item_core))
+                        {
+                            return normalize_mav_otp2_id(gid);
                         }
                     }
                 }
@@ -972,7 +1149,8 @@ pub async fn fetch_mav_station_departures(
         r#"{{
           stop(id: "{}") {{
             name
-            stoptimesWithoutPatterns(numberOfDepartures: {}) {{
+            stoptimesWithoutPatterns(timeRange: 7200, numberOfDepartures: {}) {{
+              serviceDay
               scheduledDeparture
               realtimeDeparture
               departureDelay
@@ -1003,7 +1181,7 @@ pub async fn fetch_mav_station_departures(
           }}
         }}"#,
         clean_id,
-        limit.max(30)
+        limit.max(60)
     );
 
     let resp = client
@@ -1037,8 +1215,20 @@ pub async fn fetch_mav_station_departures(
 
     let mut departures: Vec<UnifiedDeparture> = Vec::new();
     let mut dedup_map: HashMap<(bool, i32, String), usize> = HashMap::new();
+    let station_core = normalize_station_core_name(&station_name);
+    let min_service_day = stoptimes
+        .iter()
+        .filter_map(|st| st.get("serviceDay").and_then(|v| v.as_i64()))
+        .min()
+        .unwrap_or(0);
 
     for st in stoptimes {
+        let s_day = st.get("serviceDay").and_then(|v| v.as_i64()).unwrap_or(min_service_day);
+        let day_offset_sec = if min_service_day > 0 && s_day > min_service_day {
+            ((s_day - min_service_day) as i32).max(0)
+        } else {
+            0
+        };
         let trip_obj = st.get("trip");
         let trip_gtfs = trip_obj
             .and_then(|t| t.get("gtfsId"))
@@ -1082,11 +1272,8 @@ pub async fn fetch_mav_station_departures(
         let real_dep_sec = st.get("realtimeDeparture").and_then(|v| v.as_i64()).map(|v| v as i32);
         let real_arr_sec = st.get("realtimeArrival").and_then(|v| v.as_i64()).map(|v| v as i32);
 
-        let delay_sec = st
-            .get("departureDelay")
-            .or_else(|| st.get("arrivalDelay"))
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0) as i32;
+        let dep_delay_sec = st.get("departureDelay").and_then(|v| v.as_i64()).map(|v| v as i32);
+        let arr_delay_sec = st.get("arrivalDelay").and_then(|v| v.as_i64()).map(|v| v as i32);
 
         let plat = st
             .get("stop")
@@ -1099,30 +1286,60 @@ pub async fn fetch_mav_station_departures(
 
         // Terminating / Arrival check:
         // 1. scheduledDeparture is missing or 0
-        // 2. headsign matches queried station name (e.g. "Szeged" on arrival at Szeged)
-        // 3. destination from trip.stoptimes matches queried station name
+        // 2. headsign matches queried station core name (e.g. "Budapest-Déli" at Déli)
+        // 3. destination from trip.stoptimes matches queried station core name
         let is_arrival = {
             let no_dep = sched_dep_sec.map(|v| v <= 0).unwrap_or(true);
-            let headsign_is_station = !headsign.is_empty()
-                && !station_name.is_empty()
-                && (clean_station_name(&headsign).eq_ignore_ascii_case(&clean_station_name(&station_name))
-                    || station_name.to_lowercase().contains(&headsign.to_lowercase())
-                    || headsign.to_lowercase().contains(&station_name.to_lowercase()));
-            let terminus_is_station = destination_station.as_deref().map(|dest| {
-                !station_name.is_empty()
-                    && (clean_station_name(dest).eq_ignore_ascii_case(&clean_station_name(&station_name))
-                        || station_name.to_lowercase().contains(&dest.to_lowercase()))
-            }).unwrap_or(false);
+            let headsign_core = normalize_station_core_name(&headsign);
+            let headsign_is_station = !headsign_core.is_empty()
+                && !station_core.is_empty()
+                && headsign_core == station_core;
+            let terminus_is_station = destination_station
+                .as_deref()
+                .map(|dest| {
+                    let dest_core = normalize_station_core_name(dest);
+                    !dest_core.is_empty() && !station_core.is_empty() && dest_core == station_core
+                })
+                .unwrap_or(false);
 
             no_dep || headsign_is_station || terminus_is_station
         };
 
-        let sched_dep_final = sched_dep_sec.or(sched_arr_sec).unwrap_or(0);
-        let est_dep_final = real_dep_sec.or(real_arr_sec).unwrap_or(sched_dep_final);
+        // Accurately select delay: prioritize arrival delay for terminating trains, departure delay for departing trains
+        let delay_sec = if is_arrival {
+            arr_delay_sec.or(dep_delay_sec).unwrap_or(0)
+        } else {
+            dep_delay_sec.or(arr_delay_sec).unwrap_or(0)
+        };
 
-        let sched_arr_fmt = sched_arr_sec.map(|s| format_hhmm(s, "--:--"));
+        // Scheduled and estimated seconds: for arrivals, reflect the true arrival seconds (+ day_offset_sec if after midnight)
+        let sched_dep_final = (if is_arrival {
+            sched_arr_sec.filter(|&s| s > 0).or(sched_dep_sec).unwrap_or(0)
+        } else {
+            sched_dep_sec.filter(|&s| s > 0).or(sched_arr_sec).unwrap_or(0)
+        }) + day_offset_sec;
+
+        let est_dep_final = (if is_arrival {
+            real_arr_sec
+                .filter(|&s| s > 0)
+                .or_else(|| sched_arr_sec.filter(|&s| s > 0).map(|s| s + delay_sec))
+                .or(real_dep_sec)
+                .unwrap_or(sched_dep_final - day_offset_sec)
+        } else {
+            real_dep_sec
+                .filter(|&s| s > 0)
+                .or_else(|| sched_dep_sec.filter(|&s| s > 0).map(|s| s + delay_sec))
+                .or(real_arr_sec)
+                .unwrap_or(sched_dep_final - day_offset_sec)
+        }) + day_offset_sec;
+
+        let sched_arr_fmt = sched_arr_sec.filter(|&s| s > 0).map(|s| format_hhmm(s, "--:--"));
         let est_arr_fmt = real_arr_sec
-            .or_else(|| sched_arr_sec.map(|s| (s + delay_sec).max(0)))
+            .filter(|&s| s > 0)
+            .or_else(|| {
+                let d = arr_delay_sec.unwrap_or(delay_sec);
+                sched_arr_sec.filter(|&s| s > 0).map(|s| s + d)
+            })
             .map(|s| format_hhmm(s, "--:--"));
 
         // Deduplication & Merging:
@@ -1368,6 +1585,27 @@ mod tests {
             resolve_mav_otp2_stop_id_sync("MAV_005510173"),
             Some("1:005510173_0")
         );
+        // Multimodal Hub / GROUP formatted names
+        assert_eq!(
+            resolve_mav_otp2_stop_id_sync("GROUP:Nyugati pályaudvar M:47.510571:19.056072"),
+            Some("1:005510033_0")
+        );
+        assert_eq!(
+            resolve_mav_otp2_stop_id_sync("GROUP:Keleti pályaudvar M:47.500:19.083"),
+            Some("1:005510017_0")
+        );
+        assert_eq!(
+            resolve_mav_otp2_stop_id_sync("Budapest-Nyugati"),
+            Some("1:005510033_0")
+        );
+        assert_eq!(
+            resolve_mav_otp2_stop_id_sync("Déli pályaudvar"),
+            Some("1:005501016_0")
+        );
+        assert_eq!(
+            resolve_mav_otp2_stop_id_sync("GROUP:Kelenföld vasútállomás M:47.464:19.021"),
+            Some("1:005501024_0")
+        );
     }
 
     #[test]
@@ -1438,6 +1676,36 @@ mod tests {
             if let Ok(deps) = fetch_mav_station_departures(&client, "MAV_005510009", 15).await {
                 assert!(!deps.is_empty(), "Keleti departures should not be empty");
                 println!("Keleti count: {}", deps.len());
+            }
+
+            let nyugati_deps = fetch_mav_station_departures(&client, "GROUP:Nyugati pályaudvar M:47.510:19.057", 15).await;
+            if let Ok(deps) = nyugati_deps {
+                assert!(!deps.is_empty(), "Nyugati departures should not be empty");
+            }
+        });
+    }
+
+    #[test]
+    fn test_live_mav_trip_geometry() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let client = Client::builder()
+                .timeout(std::time::Duration::from_secs(10))
+                .build()
+                .unwrap();
+
+            // Query Keleti departures to get an active trip ID
+            if let Ok(deps) = fetch_mav_station_departures(&client, "1:005510017_0", 5).await {
+                if let Some(first_trip) = deps.first() {
+                    let geom = fetch_mav_trip_geometry(&client, &first_trip.trip_id).await;
+                    if let Ok(points) = geom {
+                        println!("Trip {} geometry points count: {}", first_trip.trip_id, points.len());
+                        assert!(!points.is_empty(), "Trip geometry should contain coordinates");
+                        let (lat, lon) = points[0];
+                        assert!(lat > 45.0 && lat < 50.0);
+                        assert!(lon > 15.0 && lon < 25.0);
+                    }
+                }
             }
         });
     }

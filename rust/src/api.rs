@@ -8,10 +8,11 @@ use anyhow::Result;
 use chrono::{Local, Timelike};
 use once_cell::sync::Lazy;
 use reqwest::Client;
+use serde::{Deserialize, Serialize};
 use tokio::runtime::Runtime;
 
 use crate::gtfs_rt::bkk::fetch_bkk_live_vehicles;
-use crate::gtfs_rt::mav::{fetch_mav_live_vehicles, fetch_mav_station_departures};
+use crate::gtfs_rt::mav::{fetch_mav_live_vehicles, fetch_mav_station_departures, fetch_mav_trip_geometry};
 use crate::gtfs_rt::models::{BoundingBox, StopNode, UnifiedDeparture, UnifiedVehicle};
 use crate::static_db::repository::StaticTransitRepository;
 use crate::static_db::spatial::{filter_vehicles_in_bbox, vehicles_to_geojson};
@@ -204,6 +205,30 @@ pub async fn poll_live_vehicles_geojson(
     Ok(vehicles_to_geojson(&vehicles))
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CoordinatePoint {
+    pub lat: f64,
+    pub lon: f64,
+}
+
+fn enrich_stop_nodes(nodes: &mut [StopNode]) {
+    for node in nodes.iter_mut() {
+        let n = node.name.to_lowercase();
+        if n.contains("keleti")
+            || n.contains("nyugati")
+            || n.contains("déli")
+            || n.contains("kelenföld")
+            || n.contains("kőbánya-kispest")
+            || n.contains("zugló")
+            || n.contains("ferihegy")
+            || n.contains("pályaudvar")
+            || n.contains("vasútállomás")
+        {
+            node.is_multimodal_hub = true;
+        }
+    }
+}
+
 /// Queries the SQLite R-Tree index for stop groups / station hubs inside the bounding box.
 pub fn get_stop_groups_in_bbox(
     min_lat: f64,
@@ -216,7 +241,7 @@ pub fn get_stop_groups_in_bbox(
     let Some(ref repo) = guard.repo else {
         anyhow::bail!("Static database is not initialized");
     };
-    repo.query_stop_groups_in_bbox(
+    let mut stops = repo.query_stop_groups_in_bbox(
         BoundingBox {
             min_lat,
             min_lon,
@@ -224,7 +249,9 @@ pub fn get_stop_groups_in_bbox(
             max_lon,
         },
         limit,
-    )
+    )?;
+    enrich_stop_nodes(&mut stops);
+    Ok(stops)
 }
 
 /// Queries the SQLite R-Tree index for individual platforms/posts (directions/perons) inside the bounding box.
@@ -239,7 +266,7 @@ pub fn get_platforms_in_bbox(
     let Some(ref repo) = guard.repo else {
         anyhow::bail!("Static database is not initialized");
     };
-    repo.query_platforms_in_bbox(
+    let mut stops = repo.query_platforms_in_bbox(
         BoundingBox {
             min_lat,
             min_lon,
@@ -247,7 +274,9 @@ pub fn get_platforms_in_bbox(
             max_lon,
         },
         limit,
-    )
+    )?;
+    enrich_stop_nodes(&mut stops);
+    Ok(stops)
 }
 
 /// Queries the SQLite R-Tree index for all stops inside the bounding box.
@@ -267,7 +296,9 @@ pub fn search_stops_by_name(query: String, limit: usize) -> Result<Vec<StopNode>
     let Some(ref repo) = guard.repo else {
         anyhow::bail!("Static database is not initialized");
     };
-    repo.search_stops(&query, limit)
+    let mut stops = repo.search_stops(&query, limit)?;
+    enrich_stop_nodes(&mut stops);
+    Ok(stops)
 }
 
 /// Returns the unified departure board for a stop or multimodal station hub, merging real-time delays.
@@ -289,29 +320,110 @@ pub fn get_station_departure_board(
     let seconds_since_midnight =
         (now.hour() * 3600 + now.minute() * 60 + now.second()) as i32;
 
+    let unprefix = crate::gtfs_rt::mav::strip_transit_prefixes(&stop_or_hub_id);
+    let name_from_group = if stop_or_hub_id.starts_with("GROUP:") {
+        let parts: Vec<&str> = stop_or_hub_id["GROUP:".len()..].split(':').collect();
+        parts.first().copied().unwrap_or("")
+    } else {
+        ""
+    };
+
+    let mut db_station_name = if !name_from_group.is_empty() {
+        name_from_group.to_string()
+    } else {
+        String::new()
+    };
+
+    if db_station_name.is_empty() {
+        if let Ok(conn) = repo.get_conn() {
+            if let Ok(mut stmt) = conn.prepare_cached(
+                "SELECT s.name, COALESCE(h.name, '') FROM stops s LEFT JOIN station_hubs h ON h.hub_id = s.hub_id WHERE s.id = ?1 OR s.hub_id = ?1 OR s.id = ?2 OR s.hub_id = ?2 OR s.id = ?3 OR s.hub_id = ?3 LIMIT 1"
+            ) {
+                let p1 = unprefix;
+                let p2 = format!("MAV:{}", unprefix);
+                let p3 = format!("BKK:{}", unprefix);
+                if let Ok(mut rows) = stmt.query(rusqlite::params![p1, p2, p3]) {
+                    if let Ok(Some(row)) = rows.next() {
+                        let s_name: String = row.get(0).unwrap_or_default();
+                        let h_name: String = row.get(1).unwrap_or_default();
+                        db_station_name = if !h_name.is_empty() { h_name } else { s_name };
+                    }
+                }
+            }
+        }
+    }
+
+    let combined_name_check = format!("{} {}", stop_or_hub_id, db_station_name).to_lowercase();
+
     let is_mav = stop_or_hub_id.contains("MAV")
         || stop_or_hub_id.contains("1:0055")
         || stop_or_hub_id.starts_with("1:")
         || stop_or_hub_id.contains("005510");
 
-    // For MÁV rail stations, prefer live MÁV OTP2 GraphQL departure board (has live platforms, delays, coupled train merges)
-    if is_mav {
-        let mav_res = TOKIO_RT.block_on(fetch_mav_station_departures(&client, &stop_or_hub_id, limit));
-        if let Ok(mav_deps) = mav_res {
-            if !mav_deps.is_empty() {
-                return Ok(mav_deps);
-            }
-        }
-    }
+    let is_hub_or_group = stop_or_hub_id.starts_with("GROUP:")
+        || stop_or_hub_id.starts_with("HUB:")
+        || stop_or_hub_id.starts_with("STOP:HUB:")
+        || combined_name_check.contains("pályaudvar")
+        || combined_name_check.contains("vasútállomás")
+        || combined_name_check.contains("keleti")
+        || combined_name_check.contains("nyugati")
+        || combined_name_check.contains("déli")
+        || combined_name_check.contains("deli")
+        || combined_name_check.contains("kelenföld")
+        || combined_name_check.contains("kelenfold")
+        || combined_name_check.contains("kőbánya-kispest")
+        || combined_name_check.contains("kobanya-kispest")
+        || combined_name_check.contains("zugló")
+        || combined_name_check.contains("zuglo")
+        || combined_name_check.contains("ferihegy")
+        || combined_name_check.contains("rákos")
+        || combined_name_check.contains("ferencváros")
+        || combined_name_check.contains("kőbánya alsó")
+        || combined_name_check.contains("kőbánya felső");
+
+    let resolved_mav_id = repo.resolve_mav_stop_id_from_db(&stop_or_hub_id);
 
     let local_res = repo.get_unified_departures(
         &stop_or_hub_id,
         &service_date,
-        seconds_since_midnight - 120, // Include trains/buses departing in the last 2 minutes
+        seconds_since_midnight - 120,
         (horizon_minutes.max(15)) * 60,
         &cached_delays,
         limit,
     );
+
+    if is_hub_or_group || is_mav {
+        let mav_target = resolved_mav_id.clone().or_else(|| {
+            if is_mav || combined_name_check.contains("pályaudvar") || combined_name_check.contains("vasútállomás") {
+                if !db_station_name.is_empty() {
+                    Some(format!("GROUP:{}:0:0", db_station_name))
+                } else {
+                    Some(stop_or_hub_id.clone())
+                }
+            } else {
+                None
+            }
+        });
+
+        if let Some(ref mav_query_id) = mav_target {
+            let mav_res = TOKIO_RT.block_on(fetch_mav_station_departures(&client, mav_query_id, limit));
+            match (mav_res, &local_res) {
+                (Ok(mav_deps), Ok(local_deps)) if !mav_deps.is_empty() && !local_deps.is_empty() => {
+                    let mut combined: Vec<UnifiedDeparture> = local_deps
+                        .iter()
+                        .filter(|d| d.operator != crate::gtfs_rt::models::Operator::MAV)
+                        .cloned()
+                        .collect();
+                    combined.extend(mav_deps);
+                    combined.sort_by_key(|d| d.scheduled_departure_seconds);
+                    return Ok(combined);
+                }
+                (Ok(mav_deps), _) if !mav_deps.is_empty() => return Ok(mav_deps),
+                (_, Ok(local_deps)) if !local_deps.is_empty() => return Ok(local_deps.clone()),
+                _ => {}
+            }
+        }
+    }
 
     if let Ok(ref deps) = local_res {
         if !deps.is_empty() {
@@ -319,13 +431,11 @@ pub fn get_station_departure_board(
         }
     }
 
-    // Fallback: Query live MÁV OTP2 GraphQL endpoint for rural or MÁV railway stations if not tried yet
-    if !is_mav {
-        let mav_res = TOKIO_RT.block_on(fetch_mav_station_departures(&client, &stop_or_hub_id, limit));
-        if let Ok(mav_deps) = mav_res {
-            if !mav_deps.is_empty() {
-                return Ok(mav_deps);
-            }
+    // Fallback: Query live MÁV OTP2 GraphQL endpoint for rural or MÁV railway stations if local DB had no departures
+    let fallback_mav_id = resolved_mav_id.unwrap_or_else(|| stop_or_hub_id.clone());
+    if let Ok(mav_deps) = TOKIO_RT.block_on(fetch_mav_station_departures(&client, &fallback_mav_id, limit)) {
+        if !mav_deps.is_empty() {
+            return Ok(mav_deps);
         }
     }
 
@@ -510,6 +620,41 @@ pub fn get_trip_schedule(trip_id: String) -> Result<Vec<crate::static_db::reposi
     Ok(Vec::new())
 }
 
+/// Returns the physical track geometry (lat/lon coordinates) for a trip.
+pub fn get_trip_geometry(trip_id: String) -> Result<Vec<CoordinatePoint>> {
+    let client = {
+        let guard = ENGINE_STATE.read().unwrap();
+        guard.http_client.clone()
+    };
+
+    let raw_tid = trip_id
+        .strip_prefix("MAV:")
+        .or_else(|| trip_id.strip_prefix("BKK:"))
+        .unwrap_or(&trip_id)
+        .to_string();
+
+    let is_mav = trip_id.starts_with("MAV:")
+        || trip_id.starts_with("1:")
+        || trip_id.contains("0055")
+        || raw_tid.chars().all(|c| c.is_ascii_digit());
+
+    if is_mav {
+        let mav_res = TOKIO_RT.block_on(async {
+            fetch_mav_trip_geometry(&client, &raw_tid).await.ok()
+        });
+        if let Some(coords) = mav_res {
+            if !coords.is_empty() {
+                return Ok(coords
+                    .into_iter()
+                    .map(|(lat, lon)| CoordinatePoint { lat, lon })
+                    .collect());
+            }
+        }
+    }
+
+    Ok(Vec::new())
+}
+
 // ============================================================================
 // Direct C-ABI FFI Exports (for zero-codegen `dart:ffi` / Windows & Android)
 // ============================================================================
@@ -652,6 +797,17 @@ pub unsafe extern "C" fn transit_get_trip_schedule_json(
     let trip_id = from_c_str(trip_id_ptr);
     match get_trip_schedule(trip_id) {
         Ok(stops) => into_c_string_ptr(serde_json::to_string(&stops).unwrap_or_else(|_| "[]".into())),
+        Err(_) => into_c_string_ptr("[]".to_string()),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn transit_get_trip_geometry_json(
+    trip_id_ptr: *const c_char,
+) -> *mut c_char {
+    let trip_id = from_c_str(trip_id_ptr);
+    match get_trip_geometry(trip_id) {
+        Ok(pts) => into_c_string_ptr(serde_json::to_string(&pts).unwrap_or_else(|_| "[]".into())),
         Err(_) => into_c_string_ptr("[]".to_string()),
     }
 }

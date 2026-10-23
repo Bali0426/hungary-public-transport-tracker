@@ -31,7 +31,7 @@ impl StaticTransitRepository {
             LEFT JOIN station_hubs h ON h.hub_id = s.hub_id
             WHERE rt.min_lat >= ?1 AND rt.max_lat <= ?2
               AND rt.min_lon >= ?3 AND rt.max_lon <= ?4
-              AND EXISTS (SELECT 1 FROM stop_times st WHERE st.stop_id = s.id LIMIT 1)
+              AND (s.operator_type = 'MAV' OR EXISTS (SELECT 1 FROM stop_times st WHERE st.stop_id = s.id LIMIT 1))
             "#,
         )?;
 

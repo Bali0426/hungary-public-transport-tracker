@@ -5,23 +5,8 @@ import '../../bridge/bridge_generated.dart';
 import '../../providers/timetable_provider.dart';
 import '../../utils/transit_display_utils.dart';
 
-final _originStationExpando = Expando<String>();
-final _arrivalTimeExpando = Expando<String>();
-
-extension UnifiedDepartureArrivalsExtension on UnifiedDeparture {
-  String? get estimatedArrivalTimeFormatted => _arrivalTimeExpando[this];
-  set estimatedArrivalTimeFormatted(String? value) =>
-      _arrivalTimeExpando[this] = value;
-
-  String? get originStation {
-    final explicit = _originStationExpando[this];
-    if (explicit != null && explicit.isNotEmpty) return explicit;
-    return null;
-  }
-  set originStation(String? value) => _originStationExpando[this] = value;
-}
-
 bool _isTerminatingAtCurrentStation(UnifiedDeparture dep, String stationName) {
+  if (dep.isArrival) return true;
   final h = dep.headsign.trim().toLowerCase();
   if (h == 'nem szállít utasokat' ||
       h == 'garázsmenet' ||
@@ -36,19 +21,31 @@ bool _matchesStation(String name1, String name2) {
   final s1 = _simplifyStationName(name1);
   final s2 = _simplifyStationName(name2);
   if (s1.isEmpty || s2.isEmpty) return false;
-  if (s1 == s2) return true;
-  if (s1.contains(s2) || s2.contains(s1)) return true;
-  return false;
+  return s1 == s2;
 }
 
 String _simplifyStationName(String name) {
-  return name
-      .toLowerCase()
-      .replaceAll('budapest-', '')
-      .replaceAll('budapest ', '')
-      .replaceAll(RegExp(r'\b(vasútállomás|pályaudvar|pu\.|vá\.|m\b|h\b)\b'), '')
-      .replaceAll(RegExp(r'[^a-záéíóöőúüű0-9]'), '')
-      .trim();
+  var s = name.toLowerCase().trim();
+  s = s.replaceAll(RegExp(r'\([^)]*\)'), ' ');
+  s = s.replaceAll(RegExp(r'\[[^\]]*\]'), ' ');
+  if (s.contains('/')) {
+    s = s.split('/').first.trim();
+  }
+  s = s.replaceAll('budapest-', ' ').replaceAll('budapest ', ' ');
+  for (final suffix in const [
+    'vasútállomás',
+    'pályaudvar',
+    'pu.',
+    'vá.',
+    'm+h',
+  ]) {
+    s = s.replaceAll(suffix, ' ');
+  }
+  final tokens = s
+      .split(RegExp(r'[^a-záéíóöőúüű0-9]+'))
+      .where((t) => t.isNotEmpty && t != 'm' && t != 'h' && t != 'pu' && t != 'vá')
+      .toList();
+  return tokens.join();
 }
 
 /// Style configuration for a transit route badge according to the official BudapestGO spec.
@@ -89,9 +86,22 @@ RouteBadgeStyle resolveRouteBadgeStyle({
   final upper = trimmed.toUpperCase();
 
   // 1. MÁV trains
+  final isSuburbanRailLine = RegExp(r'^[SGZ]\d{2,4}$').hasMatch(upper);
+  final isNamedTrain = upper.endsWith(' IC') ||
+      upper.endsWith(' IR') ||
+      upper.endsWith(' EC') ||
+      upper.endsWith(' EN') ||
+      upper.endsWith(' EX') ||
+      upper.contains(' IC ') ||
+      upper.contains(' IR ') ||
+      upper.contains('/ GY') ||
+      upper.contains('RAILJET') ||
+      upper.startsWith('SZ ');
   if (operator == Operator.mav ||
       vehicleType == 'train' ||
       vehicleType == 'rail' ||
+      isSuburbanRailLine ||
+      isNamedTrain ||
       upper.startsWith('IC') ||
       upper.startsWith('IR') ||
       upper.startsWith('EC') ||
@@ -100,14 +110,18 @@ RouteBadgeStyle resolveRouteBadgeStyle({
       upper.startsWith('S1') ||
       upper.startsWith('S2') ||
       upper.startsWith('S3') ||
+      upper.startsWith('S4') ||
       upper.startsWith('S5') ||
       upper.startsWith('S6') ||
       upper.startsWith('S7') ||
       upper.startsWith('S8') ||
       upper.startsWith('G1') ||
       upper.startsWith('G4') ||
+      upper.startsWith('G5') ||
       upper.startsWith('G6') ||
+      upper.startsWith('G7') ||
       upper.startsWith('G8') ||
+      upper.startsWith('Z3') ||
       upper.startsWith('Z4') ||
       upper.startsWith('Z5') ||
       upper.startsWith('Z6') ||
@@ -284,15 +298,75 @@ RouteBadgeStyle resolveRouteBadgeStyle({
   );
 }
 
+enum TransitFilter {
+  all,
+  train,
+  local,
+}
+
+bool _isTrainDeparture(UnifiedDeparture dep, [String? stationVehicleType]) {
+  if (dep.operator == Operator.mav) return true;
+  final style = resolveRouteBadgeStyle(
+    line: dep.lineName,
+    operator: dep.operator,
+    vehicleType: dep.operator == Operator.mav ? 'train' : null,
+    routeColor: dep.routeColor,
+  );
+  return style.mode == 'train';
+}
+
+bool _isRailwayHubStation(StopNode station, List<UnifiedDeparture> departures) {
+  final hasTrain = departures.any((d) => _isTrainDeparture(d, station.vehicleType));
+  final hasLocal = departures.any((d) => !_isTrainDeparture(d, station.vehicleType));
+  if (hasTrain && hasLocal) return true;
+
+  if (station.isMultimodalHub && hasTrain) return true;
+  if (station.operator == Operator.mav) return true;
+  if (station.vehicleType == 'train' || station.vehicleType == 'rail') return true;
+
+  final lower = station.name.toLowerCase();
+  const hubKeywords = [
+    'keleti',
+    'nyugati',
+    'déli',
+    'deli',
+    'kelenföld',
+    'kelenfold',
+    'kőbánya-kispest',
+    'kobanya-kispest',
+    'zugló',
+    'zuglo',
+    'ferihegy',
+    'debrecen',
+    'szeged',
+    'győr',
+    'gyor',
+    'pécs',
+    'pecs',
+    'miskolc',
+    'székesfehérvár',
+    'szekesfehervar',
+    'vasútállomás',
+    'vasutallomas',
+    'pályaudvar',
+    'palyaudvar',
+    'pu.',
+    'vá.',
+  ];
+  return hubKeywords.any((k) => lower.contains(k));
+}
+
 /// Floating Station Detail Pop-up Card matching BKK / OSM Public Transport style in Material 3.
 class StationDetailCard extends ConsumerStatefulWidget {
   final StopNode station;
   final VoidCallback onClose;
+  final void Function(UnifiedDeparture departure)? onDepartureTapped;
 
   const StationDetailCard({
     super.key,
     required this.station,
     required this.onClose,
+    this.onDepartureTapped,
   });
 
   @override
@@ -300,13 +374,43 @@ class StationDetailCard extends ConsumerStatefulWidget {
 }
 
 class _StationDetailCardState extends ConsumerState<StationDetailCard> {
+  final ScrollController _scrollController = ScrollController();
   bool _queryHub = false;
   bool _showArrivals = false;
+  TransitFilter _transitFilter = TransitFilter.all;
+  bool _hasScrolledToNow = false;
+  int _firstUpcomingIndex = -1;
+  String? _lastStationId;
+
+  @override
+  void dispose() {
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  @override
+  void didUpdateWidget(covariant StationDetailCard oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.station.id != widget.station.id) {
+      _transitFilter = TransitFilter.all;
+      _showArrivals = false;
+      _hasScrolledToNow = false;
+      _firstUpcomingIndex = -1;
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
     final station = widget.station;
-    final isInitialHub = station.isMultimodalHub ||
+    if (_lastStationId != station.id) {
+      _lastStationId = station.id;
+      _hasScrolledToNow = false;
+      _transitFilter = TransitFilter.all;
+      _firstUpcomingIndex = -1;
+    }
+    final isRailwayHub = _isRailwayHubStation(station, const []);
+    final isInitialHub = isRailwayHub ||
+        station.isMultimodalHub ||
         station.id.startsWith('HUB:') ||
         station.id.startsWith('GROUP:');
     final isGroupView = isInitialHub ? true : _queryHub;
@@ -320,6 +424,11 @@ class _StationDetailCardState extends ConsumerState<StationDetailCard> {
 
     final departuresAsync = ref.watch(stationDepartureBoardProvider(lookupKey));
     final stopCode = station.id.replaceAll('BKK_', '').replaceAll('BKK:', '');
+    final allDepartures = departuresAsync.valueOrNull ?? const [];
+    final showMultimodalTabs = _isRailwayHubStation(station, allDepartures);
+    if (!showMultimodalTabs && _transitFilter != TransitFilter.all) {
+      _transitFilter = TransitFilter.all;
+    }
 
     return Card(
       elevation: 6,
@@ -328,7 +437,7 @@ class _StationDetailCardState extends ConsumerState<StationDetailCard> {
       margin: EdgeInsets.zero,
       clipBehavior: Clip.antiAlias,
       child: ConstrainedBox(
-        constraints: const BoxConstraints(maxHeight: 520),
+        constraints: const BoxConstraints(maxHeight: 540),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -480,7 +589,10 @@ class _StationDetailCardState extends ConsumerState<StationDetailCard> {
                   Row(
                     children: [
                       InkWell(
-                        onTap: () => setState(() => _showArrivals = false),
+                        onTap: () => setState(() {
+                          _showArrivals = false;
+                          _hasScrolledToNow = false;
+                        }),
                         borderRadius: BorderRadius.circular(12),
                         child: Container(
                           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
@@ -517,7 +629,10 @@ class _StationDetailCardState extends ConsumerState<StationDetailCard> {
                       ),
                       const SizedBox(width: 6),
                       InkWell(
-                        onTap: () => setState(() => _showArrivals = true),
+                        onTap: () => setState(() {
+                          _showArrivals = true;
+                          _hasScrolledToNow = false;
+                        }),
                         borderRadius: BorderRadius.circular(12),
                         child: Container(
                           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
@@ -554,6 +669,49 @@ class _StationDetailCardState extends ConsumerState<StationDetailCard> {
                       ),
                     ],
                   ),
+                  // Multimodal Transit Filter Tabs (MÁV vs BKK vs Összes)
+                  if (showMultimodalTabs) ...[
+                    const SizedBox(height: 6),
+                    SingleChildScrollView(
+                      scrollDirection: Axis.horizontal,
+                      child: Row(
+                        children: [
+                          _buildTransitFilterChip(
+                            theme: theme,
+                            label: 'Összes járat',
+                            icon: Icons.alt_route,
+                            selected: _transitFilter == TransitFilter.all,
+                            onTap: () => setState(() {
+                              _transitFilter = TransitFilter.all;
+                              _hasScrolledToNow = false;
+                            }),
+                          ),
+                          const SizedBox(width: 6),
+                          _buildTransitFilterChip(
+                            theme: theme,
+                            label: 'Vasúti menetrend (MÁV)',
+                            icon: Icons.train,
+                            selected: _transitFilter == TransitFilter.train,
+                            onTap: () => setState(() {
+                              _transitFilter = TransitFilter.train;
+                              _hasScrolledToNow = false;
+                            }),
+                          ),
+                          const SizedBox(width: 6),
+                          _buildTransitFilterChip(
+                            theme: theme,
+                            label: 'Helyi járatok (BKK)',
+                            icon: Icons.directions_bus,
+                            selected: _transitFilter == TransitFilter.local,
+                            onTap: () => setState(() {
+                              _transitFilter = TransitFilter.local;
+                              _hasScrolledToNow = false;
+                            }),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
                 ],
               ),
             ),
@@ -561,13 +719,23 @@ class _StationDetailCardState extends ConsumerState<StationDetailCard> {
             // 3. Route Badges Bar (Járatok a megállóban)
             _buildServedRoutesBar(
               theme,
-              (departuresAsync.valueOrNull ?? const []).where((dep) {
+              allDepartures.where((dep) {
+                final isTrain = _isTrainDeparture(dep);
+                if (_transitFilter == TransitFilter.train && !isTrain) return false;
+                if (_transitFilter == TransitFilter.local && isTrain) return false;
+
                 if (_showArrivals) {
                   if (dep.originStation != null &&
                       _matchesStation(dep.originStation!, widget.station.name)) {
                     return false;
                   }
-                  return true;
+                  if (isTrain) {
+                    return dep.isArrival ||
+                        _matchesStation(dep.headsign, widget.station.name) ||
+                        dep.scheduledArrivalTimeFormatted != null ||
+                        dep.estimatedArrivalTimeFormatted != null;
+                  }
+                  return dep.isArrival || _matchesStation(dep.headsign, widget.station.name);
                 } else {
                   if (_isTerminatingAtCurrentStation(dep, widget.station.name)) {
                     return false;
@@ -583,13 +751,27 @@ class _StationDetailCardState extends ConsumerState<StationDetailCard> {
             Expanded(
               child: departuresAsync.when(
                 data: (departures) {
-                  final displayedDepartures = departures.where((dep) {
+                  var displayedDepartures = departures.where((dep) {
+                    final isTrain = _isTrainDeparture(dep);
+                    if (_transitFilter == TransitFilter.train && !isTrain) {
+                      return false;
+                    }
+                    if (_transitFilter == TransitFilter.local && isTrain) {
+                      return false;
+                    }
+
                     if (_showArrivals) {
                       if (dep.originStation != null &&
                           _matchesStation(dep.originStation!, widget.station.name)) {
                         return false;
                       }
-                      return true;
+                      if (isTrain) {
+                        return dep.isArrival ||
+                            _matchesStation(dep.headsign, widget.station.name) ||
+                            dep.scheduledArrivalTimeFormatted != null ||
+                            dep.estimatedArrivalTimeFormatted != null;
+                      }
+                      return dep.isArrival || _matchesStation(dep.headsign, widget.station.name);
                     } else {
                       if (_isTerminatingAtCurrentStation(dep, widget.station.name)) {
                         return false;
@@ -597,6 +779,17 @@ class _StationDetailCardState extends ConsumerState<StationDetailCard> {
                       return true;
                     }
                   }).toList();
+
+                  // Fallback: If in departures mode, all trips terminate here (e.g. at a terminus platform),
+                  // display them instead of a blank card.
+                  if (!_showArrivals && displayedDepartures.isEmpty && departures.isNotEmpty) {
+                    displayedDepartures = departures.where((dep) {
+                      final isTrain = _isTrainDeparture(dep);
+                      if (_transitFilter == TransitFilter.train && !isTrain) return false;
+                      if (_transitFilter == TransitFilter.local && isTrain) return false;
+                      return true;
+                    }).toList();
+                  }
 
                   if (_showArrivals) {
                     final now = DateTime.now();
@@ -609,13 +802,22 @@ class _StationDetailCardState extends ConsumerState<StationDetailCard> {
                   }
 
                   if (displayedDepartures.isEmpty) {
+                    final String emptyMsg = _transitFilter == TransitFilter.train
+                        ? (_showArrivals
+                            ? 'Nincs menetrend szerinti vasúti érkezés a következő 90 percben.'
+                            : 'Nincs menetrend szerinti vasúti indulás a következő 90 percben.')
+                        : (_transitFilter == TransitFilter.local
+                            ? (_showArrivals
+                                ? 'Nincs menetrend szerinti helyi járat érkezés a következő 90 percben.'
+                                : 'Nincs menetrend szerinti helyi járat indulás a következő 90 percben.')
+                            : (_showArrivals
+                                ? 'Nincs menetrend szerinti érkezés a következő 90 percben.'
+                                : 'Nincs menetrend szerinti indulás a következő 90 percben.'));
                     return Center(
                       child: Padding(
                         padding: const EdgeInsets.all(20),
                         child: Text(
-                          _showArrivals
-                              ? 'Nincs menetrend szerinti érkezés a következő 90 percben.'
-                              : 'Nincs menetrend szerinti indulás a következő 90 percben.',
+                          emptyMsg,
                           style: theme.textTheme.bodyMedium?.copyWith(
                             color: theme.colorScheme.onSurfaceVariant,
                           ),
@@ -624,236 +826,147 @@ class _StationDetailCardState extends ConsumerState<StationDetailCard> {
                       ),
                     );
                   }
-                  return ListView.separated(
-                    itemCount: displayedDepartures.length,
-                    padding: const EdgeInsets.symmetric(vertical: 4),
-                    separatorBuilder: (_, __) => Divider(
-                      height: 1,
-                      thickness: 0.8,
-                      color: theme.colorScheme.outlineVariant.withValues(alpha: 0.4),
-                    ),
-                    itemBuilder: (context, idx) {
-                      final dep = displayedDepartures[idx];
-                      final style = resolveRouteBadgeStyle(
-                        line: dep.lineName,
-                        operator: dep.operator,
-                        vehicleType: widget.station.vehicleType,
-                        routeColor: dep.routeColor,
-                      );
 
-                      // Countdown in minutes (NOW or min')
-                      final now = DateTime.now();
-                      final displayEstimatedTime = _showArrivals
-                          ? (dep.estimatedArrivalTimeFormatted ?? dep.estimatedTimeFormatted)
-                          : dep.estimatedTimeFormatted;
-                      final depTime = _parseDepartureTime(displayEstimatedTime, now);
-                      final diffMin = depTime.difference(now).inMinutes;
-                      final countdownStr = diffMin <= 0 ? 'NOW' : '$diffMin\'';
+                  final now = DateTime.now();
+                  int firstUpcoming = -1;
+                  for (int i = 0; i < displayedDepartures.length; i++) {
+                    final dep = displayedDepartures[i];
+                    final timeStr = _showArrivals
+                        ? (dep.estimatedArrivalTimeFormatted ?? dep.estimatedTimeFormatted)
+                        : dep.estimatedTimeFormatted;
+                    final dt = _parseDepartureTime(timeStr, now);
+                    if (!dt.isBefore(now.subtract(const Duration(minutes: 1)))) {
+                      firstUpcoming = i;
+                      break;
+                    }
+                  }
+                  _firstUpcomingIndex = firstUpcoming;
 
-                      final isDelayed = dep.delaySeconds > 120;
-                      final destinationText = _showArrivals
-                          ? ((dep.originStation != null && dep.originStation!.isNotEmpty)
-                              ? 'Honnan: ${dep.originStation}'
-                              : '${dep.lineName} ide érkezik')
-                          : dep.headsign;
+                  if (!_hasScrolledToNow && firstUpcoming > 0) {
+                    WidgetsBinding.instance.addPostFrameCallback((_) {
+                      if (_scrollController.hasClients && !_hasScrolledToNow) {
+                        _hasScrolledToNow = true;
+                        final itemHeight = _transitFilter == TransitFilter.train ? 68.0 : 54.0;
+                        final targetOffset = (firstUpcoming * itemHeight).clamp(
+                          0.0,
+                          _scrollController.position.maxScrollExtent,
+                        );
+                        if (targetOffset > 0) {
+                          _scrollController.jumpTo(targetOffset);
+                        } else {
+                          Future.delayed(const Duration(milliseconds: 60), () {
+                            if (_scrollController.hasClients) {
+                              final retryOffset = (firstUpcoming * itemHeight).clamp(
+                                0.0,
+                                _scrollController.position.maxScrollExtent,
+                              );
+                              if (retryOffset > 0) {
+                                _scrollController.jumpTo(retryOffset);
+                              }
+                            }
+                          });
+                        }
+                      }
+                    });
+                  }
 
-                      final platformText = dep.platformCode == null || dep.platformCode!.isEmpty
-                          ? null
-                          : ((style.mode == 'train' || dep.operator == Operator.mav)
-                              ? (dep.platformCode!.contains('vágány')
-                                  ? dep.platformCode!
-                                  : '${dep.platformCode}. vágány')
-                              : dep.platformCode!);
-
-                      return Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 7),
-                        child: Row(
-                          children: [
-                            // Mode circle icon
-                            TransitModeCircleIcon(mode: style.mode, size: 24),
-                            const SizedBox(width: 8),
-
-                            // Route Number Badge Pill
-                            Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 3.5),
-                              decoration: BoxDecoration(
-                                color: style.bg,
-                                borderRadius: BorderRadius.circular(5),
-                              ),
-                              child: Text(
-                                dep.lineName,
+                  return Column(
+                    children: [
+                      if (firstUpcoming > 0)
+                        Container(
+                          margin: const EdgeInsets.fromLTRB(16, 4, 16, 2),
+                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3.5),
+                          decoration: BoxDecoration(
+                            color: theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.6),
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: Row(
+                            children: [
+                              Icon(Icons.history, size: 12, color: theme.colorScheme.onSurfaceVariant),
+                              const SizedBox(width: 5),
+                              Text(
+                                '$firstUpcoming korábbi járat a mai napról',
                                 style: TextStyle(
-                                  color: style.fg,
-                                  fontWeight: FontWeight.w800,
-                                  fontSize: 13,
+                                  fontSize: 11,
+                                  color: theme.colorScheme.onSurfaceVariant,
                                 ),
                               ),
-                            ),
-                            const SizedBox(width: 8),
-
-                            // Warning Disruption Badge !
-                            if (isDelayed) ...[
-                              Container(
-                                width: 18,
-                                height: 18,
-                                decoration: const BoxDecoration(
-                                  color: Color(0xFFFFD600),
-                                  shape: BoxShape.circle,
-                                ),
-                                child: const Center(
-                                  child: Text(
-                                    '!',
-                                    style: TextStyle(
-                                      color: Colors.black,
-                                      fontWeight: FontWeight.w900,
-                                      fontSize: 12,
+                              const Spacer(),
+                              InkWell(
+                                onTap: () {
+                                  if (_scrollController.hasClients && _firstUpcomingIndex > 0) {
+                                    final itemHeight = _transitFilter == TransitFilter.train ? 68.0 : 54.0;
+                                    final targetOffset = (_firstUpcomingIndex * itemHeight).clamp(
+                                      0.0,
+                                      _scrollController.position.maxScrollExtent,
+                                    );
+                                    _scrollController.animateTo(
+                                      targetOffset,
+                                      duration: const Duration(milliseconds: 300),
+                                      curve: Curves.easeOut,
+                                    );
+                                  }
+                                },
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Icon(Icons.arrow_downward, size: 11, color: theme.colorScheme.primary),
+                                    const SizedBox(width: 3),
+                                    Text(
+                                      'Ugrás a most indulókhoz',
+                                      style: TextStyle(
+                                        fontSize: 10.5,
+                                        fontWeight: FontWeight.w700,
+                                        color: theme.colorScheme.primary,
+                                      ),
                                     ),
-                                  ),
-                                ),
-                              ),
-                              const SizedBox(width: 6),
-                            ],
-
-                            // Low-floor Wheelchair Icon
-                            Container(
-                              width: 18,
-                              height: 18,
-                              decoration: BoxDecoration(
-                                shape: BoxShape.circle,
-                                border: Border.all(
-                                  color: theme.colorScheme.outlineVariant,
-                                  width: 1.2,
-                                ),
-                              ),
-                              child: Center(
-                                child: Icon(
-                                  Icons.accessible,
-                                  size: 11,
-                                  color: theme.colorScheme.onSurfaceVariant,
-                                ),
-                              ),
-                            ),
-                            const SizedBox(width: 10),
-
-                            // Platform code badge (if available)
-                            if (platformText != null) ...[
-                              Container(
-                                padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
-                                decoration: BoxDecoration(
-                                  color: theme.colorScheme.surfaceContainerHighest,
-                                  borderRadius: BorderRadius.circular(4),
-                                  border: Border.all(
-                                    color: theme.colorScheme.outlineVariant.withValues(alpha: 0.6),
-                                    width: 0.8,
-                                  ),
-                                ),
-                                child: Text(
-                                  platformText,
-                                  style: TextStyle(
-                                    fontSize: 10.5,
-                                    fontWeight: FontWeight.w700,
-                                    color: theme.colorScheme.onSurfaceVariant,
-                                  ),
-                                ),
-                              ),
-                              const SizedBox(width: 8),
-                            ],
-
-                            // Realtime delay badge (+Xp or Pontos)
-                            if (dep.isRealtime && dep.delaySeconds > 120) ...[
-                              Container(
-                                padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
-                                decoration: BoxDecoration(
-                                  color: const Color(0xFFEF4444).withValues(alpha: 0.15),
-                                  borderRadius: BorderRadius.circular(4),
-                                ),
-                                child: Text(
-                                  '+${(dep.delaySeconds / 60).round()}p',
-                                  style: const TextStyle(
-                                    color: Color(0xFFEF4444),
-                                    fontWeight: FontWeight.w800,
-                                    fontSize: 11,
-                                  ),
-                                ),
-                              ),
-                              const SizedBox(width: 6),
-                            ] else if (dep.isRealtime) ...[
-                              Container(
-                                padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
-                                decoration: BoxDecoration(
-                                  color: const Color(0xFF22C55E).withValues(alpha: 0.15),
-                                  borderRadius: BorderRadius.circular(4),
-                                ),
-                                child: const Text(
-                                  'Pontos',
-                                  style: TextStyle(
-                                    color: Color(0xFF16A34A),
-                                    fontWeight: FontWeight.w700,
-                                    fontSize: 10.5,
-                                  ),
-                                ),
-                              ),
-                              const SizedBox(width: 6),
-                            ],
-
-                            // Minutes Countdown (GREEN / NOW)
-                            Text(
-                              countdownStr,
-                              style: const TextStyle(
-                                color: Color(0xFF00875A), // Authentic transit green countdown
-                                fontWeight: FontWeight.w700,
-                                fontSize: 14,
-                              ),
-                            ),
-                            const SizedBox(width: 6),
-
-                            if (isDelayed && dep.scheduledTimeFormatted.isNotEmpty) ...[
-                              Text(
-                                dep.scheduledTimeFormatted,
-                                style: TextStyle(
-                                  color: theme.colorScheme.onSurfaceVariant.withValues(alpha: 0.6),
-                                  decoration: TextDecoration.lineThrough,
-                                  fontSize: 11.5,
-                                ),
-                              ),
-                              const SizedBox(width: 4),
-                              Text(
-                                displayEstimatedTime,
-                                style: TextStyle(
-                                  color: theme.colorScheme.onSurface,
-                                  fontWeight: FontWeight.w700,
-                                  fontSize: 12,
-                                ),
-                              ),
-                            ] else ...[
-                              Text(
-                                displayEstimatedTime,
-                                style: TextStyle(
-                                  color: theme.colorScheme.onSurfaceVariant,
-                                  fontWeight: FontWeight.w600,
-                                  fontSize: 12,
+                                  ],
                                 ),
                               ),
                             ],
-                            const SizedBox(width: 10),
-
-                            // Destination / Headsign or Origin
-                            Expanded(
-                              child: Text(
-                                destinationText,
-                                style: TextStyle(
-                                  color: theme.colorScheme.onSurface,
-                                  fontSize: 13.5,
-                                  fontWeight: FontWeight.w600,
-                                ),
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                            ),
-                          ],
+                          ),
                         ),
-                      );
-                    },
+                      Expanded(
+                        child: ListView.separated(
+                          controller: _scrollController,
+                          itemCount: displayedDepartures.length,
+                          padding: const EdgeInsets.symmetric(vertical: 4),
+                          separatorBuilder: (_, __) => Divider(
+                            height: 1,
+                            thickness: 0.8,
+                            color: theme.colorScheme.outlineVariant.withValues(alpha: 0.4),
+                          ),
+                          itemBuilder: (context, idx) {
+                            final dep = displayedDepartures[idx];
+                            final isTrain = _isTrainDeparture(dep);
+                            final style = resolveRouteBadgeStyle(
+                              line: dep.lineName,
+                              operator: dep.operator,
+                              vehicleType: isTrain ? 'train' : null,
+                              routeColor: dep.routeColor,
+                            );
+
+                            if (isTrain) {
+                              return _buildTrainDepartureRow(
+                                context,
+                                theme,
+                                dep,
+                                style,
+                                _showArrivals,
+                              );
+                            } else {
+                              return _buildLocalDepartureRow(
+                                context,
+                                theme,
+                                dep,
+                                style,
+                                _showArrivals,
+                              );
+                            }
+                          },
+                        ),
+                      ),
+                    ],
                   );
                 },
                 loading: () => const Center(
@@ -879,10 +992,1088 @@ class _StationDetailCardState extends ConsumerState<StationDetailCard> {
     );
   }
 
+  Widget _buildTransitFilterChip({
+    required ThemeData theme,
+    required String label,
+    required IconData icon,
+    required bool selected,
+    required VoidCallback onTap,
+  }) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(16),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 150),
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4.5),
+        decoration: BoxDecoration(
+          color: selected
+              ? theme.colorScheme.primary
+              : theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.6),
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(
+            color: selected
+                ? theme.colorScheme.primary
+                : theme.colorScheme.outlineVariant.withValues(alpha: 0.4),
+            width: 0.8,
+          ),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              icon,
+              size: 13,
+              color: selected
+                  ? theme.colorScheme.onPrimary
+                  : theme.colorScheme.onSurfaceVariant,
+            ),
+            const SizedBox(width: 5),
+            Text(
+              label,
+              style: TextStyle(
+                color: selected
+                    ? theme.colorScheme.onPrimary
+                    : theme.colorScheme.onSurfaceVariant,
+                fontSize: 11.5,
+                fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// Builds a structured, professional MÁV train departure row matching M3 / BudapestGO spec
+  Widget _buildTrainDepartureRow(
+    BuildContext context,
+    ThemeData theme,
+    UnifiedDeparture dep,
+    RouteBadgeStyle style,
+    bool showArrivals,
+  ) {
+    final now = DateTime.now();
+    final displayEstimatedTime = showArrivals
+        ? (dep.estimatedArrivalTimeFormatted ?? dep.estimatedTimeFormatted)
+        : dep.estimatedTimeFormatted;
+    final scheduledTime = showArrivals
+        ? (dep.scheduledArrivalTimeFormatted ?? dep.scheduledTimeFormatted)
+        : dep.scheduledTimeFormatted;
+    final targetTimeStr = displayEstimatedTime.isNotEmpty ? displayEstimatedTime : scheduledTime;
+    final targetTime = _parseDepartureTime(targetTimeStr, now);
+    final diffMin = targetTime.difference(now).inMinutes;
+
+    final isDelayed = dep.delaySeconds > 120;
+    final delayMin = (dep.delaySeconds / 60).round();
+    final Color delayColor = dep.delaySeconds > 300
+        ? const Color(0xFFDC2626) // > 5 min: red
+        : (dep.delaySeconds > 120
+            ? const Color(0xFFD97706) // 2-5 min: amber/yellow
+            : const Color(0xFF16A34A)); // <= 2 min: green
+
+    final isTerminatingHere = dep.isArrival || _matchesStation(dep.headsign, widget.station.name);
+    final destinationText = showArrivals
+        ? ((dep.originStation != null && dep.originStation!.isNotEmpty)
+            ? (isTerminatingHere || dep.headsign.isEmpty
+                ? 'Honnan: ${dep.originStation}'
+                : 'Honnan: ${dep.originStation} (→ ${dep.headsign})')
+            : '${dep.lineName} ide érkezik')
+        : dep.headsign;
+
+    final platformText = dep.platformCode == null || dep.platformCode!.isEmpty
+        ? null
+        : (dep.platformCode!.contains('vágány')
+            ? dep.platformCode!
+            : '${dep.platformCode}. vágány');
+
+    final schedDt = scheduledTime.isNotEmpty ? _parseDepartureTime(scheduledTime, now) : null;
+    final isSchedPassed = schedDt != null && schedDt.isBefore(now);
+    final shouldStrikethrough = (isDelayed || isSchedPassed) &&
+        scheduledTime.isNotEmpty &&
+        scheduledTime != displayEstimatedTime;
+
+    // Immediate departure badge (ONLY if 0 <= diffMin <= 1)
+    final isImmediate = diffMin >= 0 && diffMin <= 1;
+
+    final isDark = theme.brightness == Brightness.dark;
+    Color rowBgColor;
+    Color rowBorderColor;
+
+    if (dep.isRealtime) {
+      if (dep.delaySeconds > 600) {
+        // 10+ min delay: soft red
+        rowBgColor = isDark
+            ? const Color(0xFF4A151B).withValues(alpha: 0.35)
+            : const Color(0xFFFFEBEE);
+        rowBorderColor = isDark
+            ? const Color(0xFF8B0000).withValues(alpha: 0.3)
+            : const Color(0xFFFFCDD2);
+      } else if (dep.delaySeconds > 120) {
+        // 3-9 min delay: soft yellow / amber
+        rowBgColor = isDark
+            ? const Color(0xFF3E3618).withValues(alpha: 0.35)
+            : const Color(0xFFFFFDE7);
+        rowBorderColor = isDark
+            ? const Color(0xFFB45309).withValues(alpha: 0.3)
+            : const Color(0xFFFFF59D);
+      } else {
+        // On-time / <= 2 min: soft green
+        rowBgColor = isDark
+            ? const Color(0xFF1B3B2B).withValues(alpha: 0.35)
+            : const Color(0xFFE8F5E9);
+        rowBorderColor = isDark
+            ? const Color(0xFF16A34A).withValues(alpha: 0.3)
+            : const Color(0xFFC8E6C9);
+      }
+    } else {
+      rowBgColor = theme.colorScheme.surfaceContainerLow;
+      rowBorderColor = theme.colorScheme.outlineVariant.withValues(alpha: 0.25);
+    }
+
+    final rollingStock = _inferRollingStock(dep);
+
+    return InkWell(
+      onTap: () {
+        if (widget.onDepartureTapped != null) {
+          widget.onDepartureTapped!(dep);
+        } else {
+          _showTrainTripDetailsSheet(context, theme, dep);
+        }
+      },
+      borderRadius: BorderRadius.circular(10),
+      child: Container(
+        margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 3.5),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        decoration: BoxDecoration(
+          color: rowBgColor,
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: rowBorderColor, width: 0.9),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            // Line 1: [Times: Scheduled -> Estimated] [Destination] [Platform] [Azonnal]
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                if (shouldStrikethrough) ...[
+                  Text(
+                    scheduledTime,
+                    style: TextStyle(
+                      color: theme.colorScheme.onSurfaceVariant.withValues(alpha: 0.6),
+                      decoration: TextDecoration.lineThrough,
+                      fontSize: 13,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                  const SizedBox(width: 4),
+                  const Text('→', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
+                  const SizedBox(width: 4),
+                  Text(
+                    displayEstimatedTime,
+                    style: TextStyle(
+                      color: delayColor,
+                      fontWeight: FontWeight.w800,
+                      fontSize: 14,
+                    ),
+                  ),
+                ] else ...[
+                  Text(
+                    displayEstimatedTime.isNotEmpty ? displayEstimatedTime : scheduledTime,
+                    style: TextStyle(
+                      color: isDelayed ? delayColor : theme.colorScheme.onSurface,
+                      fontWeight: FontWeight.w800,
+                      fontSize: 14,
+                    ),
+                  ),
+                ],
+
+                const SizedBox(width: 8),
+
+                // Destination
+                Expanded(
+                  child: Text(
+                    destinationText,
+                    style: TextStyle(
+                      color: theme.colorScheme.onSurface,
+                      fontSize: 13.5,
+                      fontWeight: FontWeight.w700,
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+
+                const SizedBox(width: 6),
+
+                // Platform / Peron
+                if (platformText != null) ...[
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: theme.colorScheme.secondaryContainer,
+                      borderRadius: BorderRadius.circular(5),
+                      border: Border.all(
+                        color: theme.colorScheme.outlineVariant.withValues(alpha: 0.4),
+                        width: 0.8,
+                      ),
+                    ),
+                    child: Text(
+                      platformText,
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w700,
+                        color: theme.colorScheme.onSecondaryContainer,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 4),
+                ],
+
+                // Immediate departure badge (ONLY if 0 <= diffMin <= 1)
+                if (isImmediate) ...[
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF22C55E).withValues(alpha: 0.2),
+                      borderRadius: BorderRadius.circular(4),
+                    ),
+                    child: const Text(
+                      'Azonnal',
+                      style: TextStyle(
+                        color: Color(0xFF16A34A),
+                        fontWeight: FontWeight.w800,
+                        fontSize: 11,
+                      ),
+                    ),
+                  ),
+                ],
+              ],
+            ),
+
+            const SizedBox(height: 5),
+
+            // Line 2: [Route Pill] [Delay / Pontos] [Rolling Stock] [Spacer] [Equipment Badges]
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                // Route pill badge
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2.5),
+                  decoration: BoxDecoration(
+                    color: _resolveTrainBadgeColor(dep.lineName),
+                    borderRadius: BorderRadius.circular(5),
+                  ),
+                  child: Text(
+                    dep.lineName,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.w800,
+                      fontSize: 11.5,
+                      letterSpacing: 0.2,
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+
+                // Delay / Punctual text
+                if (dep.isRealtime && isDelayed) ...[
+                  const SizedBox(width: 5),
+                  Text(
+                    '/ ',
+                    style: TextStyle(
+                      fontSize: 11.5,
+                      color: theme.colorScheme.onSurfaceVariant.withValues(alpha: 0.6),
+                    ),
+                  ),
+                  Text(
+                    '+$delayMin perc késés',
+                    style: TextStyle(
+                      color: delayColor,
+                      fontWeight: FontWeight.w800,
+                      fontSize: 11.5,
+                    ),
+                  ),
+                ] else if (dep.isRealtime) ...[
+                  const SizedBox(width: 5),
+                  Text(
+                    '/ ',
+                    style: TextStyle(
+                      fontSize: 11.5,
+                      color: theme.colorScheme.onSurfaceVariant.withValues(alpha: 0.6),
+                    ),
+                  ),
+                  const Text(
+                    'Pontos',
+                    style: TextStyle(
+                      color: Color(0xFF16A34A),
+                      fontWeight: FontWeight.w700,
+                      fontSize: 11,
+                    ),
+                  ),
+                ],
+
+                // Rolling stock
+                if (rollingStock.isNotEmpty) ...[
+                  const SizedBox(width: 4),
+                  Flexible(
+                    child: Text(
+                      rollingStock,
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: theme.colorScheme.onSurfaceVariant.withValues(alpha: 0.8),
+                        fontStyle: FontStyle.italic,
+                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                ],
+
+                const Spacer(),
+
+                // Equipment icons (Image 1 style)
+                _buildTrainEquipmentBadges(dep, theme),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// Displays the full detailed trip timetable sheet matching Image 2
+  void _showTrainTripDetailsSheet(
+    BuildContext context,
+    ThemeData theme,
+    UnifiedDeparture dep,
+  ) {
+    final isDark = theme.brightness == Brightness.dark;
+    final delayMin = (dep.delaySeconds / 60).round();
+    final isDelayed = dep.delaySeconds > 120;
+    final delayColor = dep.delaySeconds > 300
+        ? const Color(0xFFDC2626)
+        : (dep.delaySeconds > 120 ? const Color(0xFFD97706) : const Color(0xFF16A34A));
+
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: theme.colorScheme.surface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (modalCtx) {
+        return DraggableScrollableSheet(
+          initialChildSize: 0.68,
+          minChildSize: 0.4,
+          maxChildSize: 0.94,
+          expand: false,
+          builder: (sheetCtx, sheetScrollController) {
+            return Consumer(
+              builder: (consumerCtx, ref, _) {
+                final tripScheduleAsync = ref.watch(tripScheduleProvider(dep.tripId));
+
+                return Column(
+                  children: [
+                    // Grab handle
+                    Container(
+                      margin: const EdgeInsets.symmetric(vertical: 8),
+                      width: 40,
+                      height: 4,
+                      decoration: BoxDecoration(
+                        color: theme.colorScheme.onSurfaceVariant.withValues(alpha: 0.3),
+                        borderRadius: BorderRadius.circular(2),
+                      ),
+                    ),
+
+                    // Header: Train Pill Badge, Destination, Platform, Close
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                      child: Row(
+                        children: [
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 3.5),
+                            decoration: BoxDecoration(
+                              color: _resolveTrainBadgeColor(dep.lineName),
+                              borderRadius: BorderRadius.circular(6),
+                            ),
+                            child: Text(
+                              dep.lineName,
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontWeight: FontWeight.w900,
+                                fontSize: 13.5,
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  '${dep.headsign} felé',
+                                  style: const TextStyle(
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                                if (dep.platformCode != null && dep.platformCode!.isNotEmpty)
+                                  Text(
+                                    dep.platformCode!.contains('vágány')
+                                        ? dep.platformCode!
+                                        : '${dep.platformCode}. vágány',
+                                    style: TextStyle(
+                                      fontSize: 11.5,
+                                      color: theme.colorScheme.onSurfaceVariant,
+                                    ),
+                                  ),
+                              ],
+                            ),
+                          ),
+                          IconButton(
+                            icon: const Icon(Icons.close),
+                            onPressed: () => Navigator.of(modalCtx).pop(),
+                          ),
+                        ],
+                      ),
+                    ),
+
+                    // Delay Reason / Status Banner (Image 2 style)
+                    Container(
+                      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                      decoration: BoxDecoration(
+                        color: isDelayed
+                            ? (isDark
+                                ? const Color(0xFF3E1C1F).withValues(alpha: 0.5)
+                                : const Color(0xFFFFF1F2))
+                            : (isDark
+                                ? const Color(0xFF1B3B2B).withValues(alpha: 0.5)
+                                : const Color(0xFFF0FDF4)),
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(
+                          color: isDelayed
+                              ? (isDark ? const Color(0xFF8B0000) : const Color(0xFFFECDD3))
+                              : (isDark ? const Color(0xFF16A34A) : const Color(0xFFBBF7D0)),
+                          width: 0.8,
+                        ),
+                      ),
+                      child: Row(
+                        children: [
+                          Icon(
+                            isDelayed ? Icons.warning_amber_rounded : Icons.check_circle_outline,
+                            size: 20,
+                            color: delayColor,
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  isDelayed ? 'Késés: +$delayMin perc' : 'Menetrend szerinti közlekedés',
+                                  style: TextStyle(
+                                    fontWeight: FontWeight.w800,
+                                    fontSize: 13,
+                                    color: delayColor,
+                                  ),
+                                ),
+                                Text(
+                                  isDelayed
+                                      ? 'Késés oka: Menetrendi eltérés / Forgalmi ok'
+                                      : 'A vonat menetrend szerint pontosan közlekedik',
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    color: theme.colorScheme.onSurfaceVariant,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+
+                    const Divider(height: 10),
+
+                    // Table Header (Image 2 style: Állomás | Tervezett (Érk. Ind.) | Tény / Becsült (Érk. Ind.))
+                    Container(
+                      color: theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.4),
+                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+                      child: Row(
+                        children: [
+                          const Expanded(
+                            flex: 4,
+                            child: Text(
+                              'Állomás',
+                              style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w700),
+                            ),
+                          ),
+                          Expanded(
+                            flex: 3,
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.center,
+                              children: const [
+                                Text('Tervezett', style: TextStyle(fontSize: 10.5, fontWeight: FontWeight.w700)),
+                                Row(
+                                  mainAxisAlignment: MainAxisAlignment.spaceAround,
+                                  children: [
+                                    Text('Érk.', style: TextStyle(fontSize: 9.5, color: Colors.grey)),
+                                    Text('Ind.', style: TextStyle(fontSize: 9.5, color: Colors.grey)),
+                                  ],
+                                ),
+                              ],
+                            ),
+                          ),
+                          Expanded(
+                            flex: 3,
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.center,
+                              children: const [
+                                Text('Tény/Becsült', style: TextStyle(fontSize: 10.5, fontWeight: FontWeight.w700)),
+                                Row(
+                                  mainAxisAlignment: MainAxisAlignment.spaceAround,
+                                  children: [
+                                    Text('Érk.', style: TextStyle(fontSize: 9.5, color: Colors.grey)),
+                                    Text('Ind.', style: TextStyle(fontSize: 9.5, color: Colors.grey)),
+                                  ],
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+
+                    // Stop Times Table List
+                    Expanded(
+                      child: tripScheduleAsync.when(
+                        loading: () => const Center(
+                          child: Padding(
+                            padding: EdgeInsets.all(24.0),
+                            child: CircularProgressIndicator(),
+                          ),
+                        ),
+                        error: (err, _) => Center(
+                          child: Padding(
+                            padding: const EdgeInsets.all(24.0),
+                            child: Text(
+                              'A menetrendi részletek jelenleg nem érhetők el.',
+                              style: TextStyle(color: theme.colorScheme.onSurfaceVariant),
+                            ),
+                          ),
+                        ),
+                        data: (stops) {
+                          if (stops.isEmpty) {
+                            return Center(
+                              child: Padding(
+                                padding: const EdgeInsets.all(24.0),
+                                child: Text(
+                                  'Nincs részletes megállólista ehhez a járathoz.',
+                                  style: TextStyle(color: theme.colorScheme.onSurfaceVariant),
+                                ),
+                              ),
+                            );
+                          }
+
+                          final now = DateTime.now();
+
+                          return ListView.separated(
+                            controller: sheetScrollController,
+                            itemCount: stops.length,
+                            separatorBuilder: (_, __) => Divider(
+                              height: 1,
+                              thickness: 0.5,
+                              color: theme.colorScheme.outlineVariant.withValues(alpha: 0.2),
+                            ),
+                            itemBuilder: (ctx, i) {
+                              final stop = stops[i];
+                              final schedDep = stop.departureTime;
+                              final schedArr = stop.arrivalTime ?? '-';
+                              final estDep = stop.predictedDepartureTime ?? schedDep;
+                              final estArr = stop.predictedArrivalTime ?? schedArr;
+
+                              // Check if stop is passed (Image 2 green background)
+                              final targetTimeStr = estDep.isNotEmpty ? estDep : schedDep;
+                              final targetDt = _parseDepartureTime(targetTimeStr, now);
+                              final isPassed = targetDt.isBefore(now);
+                              final isCurrentStop = _matchesStation(stop.stopName, widget.station.name);
+
+                              Color? rowBg;
+                              if (isPassed) {
+                                rowBg = isDark
+                                    ? const Color(0xFF1B3B2B).withValues(alpha: 0.3)
+                                    : const Color(0xFFE8F5E9).withValues(alpha: 0.85);
+                              } else if (isCurrentStop) {
+                                rowBg = theme.colorScheme.primaryContainer.withValues(alpha: 0.25);
+                              }
+
+                              return Container(
+                                color: rowBg,
+                                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 7),
+                                child: Row(
+                                  children: [
+                                    // Station name + platform
+                                    Expanded(
+                                      flex: 4,
+                                      child: Row(
+                                        children: [
+                                          if (isPassed)
+                                            const Padding(
+                                              padding: EdgeInsets.only(right: 5),
+                                              child: Icon(Icons.check_circle, size: 13, color: Color(0xFF16A34A)),
+                                            )
+                                          else if (isCurrentStop)
+                                            Padding(
+                                              padding: const EdgeInsets.only(right: 5),
+                                              child: Icon(Icons.location_on, size: 13, color: theme.colorScheme.primary),
+                                            ),
+                                          Expanded(
+                                            child: Column(
+                                              crossAxisAlignment: CrossAxisAlignment.start,
+                                              children: [
+                                                Text(
+                                                  stop.stopName,
+                                                  style: TextStyle(
+                                                    fontSize: 12,
+                                                    fontWeight: isCurrentStop ? FontWeight.w800 : FontWeight.w600,
+                                                    color: isCurrentStop ? theme.colorScheme.primary : theme.colorScheme.onSurface,
+                                                  ),
+                                                  maxLines: 1,
+                                                  overflow: TextOverflow.ellipsis,
+                                                ),
+                                                if (stop.platformCode != null && stop.platformCode!.isNotEmpty)
+                                                  Text(
+                                                    '${stop.platformCode}. vágány',
+                                                    style: TextStyle(
+                                                      fontSize: 10,
+                                                      color: theme.colorScheme.onSurfaceVariant,
+                                                    ),
+                                                  ),
+                                              ],
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+
+                                    // Tervezett: Arr / Dep
+                                    Expanded(
+                                      flex: 3,
+                                      child: Row(
+                                        mainAxisAlignment: MainAxisAlignment.spaceAround,
+                                        children: [
+                                          Text(schedArr, style: const TextStyle(fontSize: 11)),
+                                          Text(schedDep, style: const TextStyle(fontSize: 11)),
+                                        ],
+                                      ),
+                                    ),
+
+                                    // Tény / Becsült: Arr / Dep
+                                    Expanded(
+                                      flex: 3,
+                                      child: Row(
+                                        mainAxisAlignment: MainAxisAlignment.spaceAround,
+                                        children: [
+                                          Text(
+                                            estArr,
+                                            style: TextStyle(
+                                              fontSize: 11,
+                                              fontWeight: FontWeight.w700,
+                                              color: stop.delaySeconds > 120 ? delayColor : theme.colorScheme.onSurface,
+                                            ),
+                                          ),
+                                          Text(
+                                            estDep,
+                                            style: TextStyle(
+                                              fontSize: 11,
+                                              fontWeight: FontWeight.w700,
+                                              color: stop.delaySeconds > 120 ? delayColor : theme.colorScheme.onSurface,
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              );
+                            },
+                          );
+                        },
+                      ),
+                    ),
+                  ],
+                );
+              },
+            );
+          },
+        );
+      },
+    );
+  }
+
+  /// Resolves train badge color according to MÁV categories (IR, IC, RJ, S, Z, G)
+  Color _resolveTrainBadgeColor(String lineName) {
+    final upper = lineName.toUpperCase();
+    if (upper.startsWith('IR') || upper.contains('INTERREGIO')) {
+      return const Color(0xFF00838F); // Teal
+    } else if (upper.startsWith('IC') || upper.contains('INTERCITY') || upper.startsWith('EC') || upper.startsWith('EN')) {
+      return const Color(0xFF6A1B9A); // Purple
+    } else if (upper.startsWith('RJ') || upper.startsWith('RJX')) {
+      return const Color(0xFFC62828); // Railjet Red
+    } else if (upper.startsWith('Z')) {
+      return const Color(0xFF1B5E20); // Zónázó Dark Green
+    } else if (upper.startsWith('G')) {
+      return const Color(0xFF0D47A1); // Gyorsított Dark Blue
+    }
+    return const Color(0xFF003B7A); // MÁV Blue
+  }
+
+  /// Infers commonly operated rolling stock by line (Stadler KISS, FLIRT, IC+, Desiro, Railjet)
+  String _inferRollingStock(UnifiedDeparture dep) {
+    final line = dep.lineName.toUpperCase();
+    if (line.contains('KISS')) return ', Stadler KISS';
+    if (line.startsWith('S70') || line.startsWith('Z70') || line.startsWith('S50') || line.startsWith('Z50')) {
+      return ', Stadler KISS';
+    }
+    if (line.startsWith('S10') || line.startsWith('S12') || line.startsWith('S30') || line.startsWith('Z30') || line.startsWith('S40') || line.startsWith('S42')) {
+      return ', Stadler FLIRT';
+    }
+    if (line.startsWith('IC') || line.contains('INTERCITY')) {
+      return ', IC+ kocsi';
+    }
+    if (line.startsWith('IR') || line.contains('INTERREGIO')) {
+      return ', Stadler FLIRT';
+    }
+    if (line.startsWith('RJ')) {
+      return ', ÖBB Railjet';
+    }
+    if (line.startsWith('S25') || line.startsWith('S210') || line.startsWith('S750')) {
+      return ', Desiro';
+    }
+    return '';
+  }
+
+  /// Builds equipment badges (Bicycle, 2nd/1st class, Reservation, AC, WiFi) matching Image 1
+  Widget _buildTrainEquipmentBadges(UnifiedDeparture dep, ThemeData theme) {
+    final line = dep.lineName.toUpperCase();
+    final isIC = line.startsWith('IC') || line.contains('INTERCITY') || line.startsWith('EC') || line.startsWith('RJ');
+    final isDark = theme.brightness == Brightness.dark;
+    final chipBg = isDark
+        ? Colors.white.withValues(alpha: 0.1)
+        : Colors.black.withValues(alpha: 0.06);
+    final chipFg = theme.colorScheme.onSurfaceVariant;
+
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        // Bike icon
+        Icon(Icons.pedal_bike, size: 13, color: chipFg),
+        const SizedBox(width: 4),
+
+        // Class badge [2.] or [1-2]
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+          decoration: BoxDecoration(
+            color: chipBg,
+            borderRadius: BorderRadius.circular(3),
+          ),
+          child: Text(
+            isIC ? '1-2' : '2.',
+            style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: chipFg),
+          ),
+        ),
+        const SizedBox(width: 4),
+
+        // Seat reservation badge [R]
+        if (isIC) ...[
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+            decoration: BoxDecoration(
+              color: chipBg,
+              borderRadius: BorderRadius.circular(3),
+            ),
+            child: Text(
+              'R',
+              style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: chipFg),
+            ),
+          ),
+          const SizedBox(width: 4),
+        ],
+
+        // AC icon
+        Icon(Icons.ac_unit, size: 12, color: chipFg),
+        const SizedBox(width: 4),
+
+        // WiFi icon
+        Icon(Icons.wifi, size: 12, color: chipFg),
+      ],
+    );
+  }
+
+  /// Builds a BKK local transit departure row (bus, tram, trolley, metro, boat)
+  Widget _buildLocalDepartureRow(
+    BuildContext context,
+    ThemeData theme,
+    UnifiedDeparture dep,
+    RouteBadgeStyle style,
+    bool showArrivals,
+  ) {
+    final now = DateTime.now();
+    final displayEstimatedTime = showArrivals
+        ? (dep.estimatedArrivalTimeFormatted ?? dep.estimatedTimeFormatted)
+        : dep.estimatedTimeFormatted;
+    final scheduledTime = showArrivals
+        ? (dep.scheduledArrivalTimeFormatted ?? dep.scheduledTimeFormatted)
+        : dep.scheduledTimeFormatted;
+    final targetTimeStr = displayEstimatedTime.isNotEmpty ? displayEstimatedTime : scheduledTime;
+    final targetTime = _parseDepartureTime(targetTimeStr, now);
+    final diffMin = targetTime.difference(now).inMinutes;
+
+    final isDelayed = dep.delaySeconds > 120;
+    final delayMin = (dep.delaySeconds / 60).round();
+    final Color delayColor = dep.delaySeconds > 300
+        ? const Color(0xFFDC2626)
+        : (dep.delaySeconds > 120 ? const Color(0xFFD97706) : const Color(0xFF16A34A));
+
+    final destinationText = showArrivals
+        ? ((dep.originStation != null && dep.originStation!.isNotEmpty)
+            ? 'Honnan: ${dep.originStation}'
+            : '${dep.lineName} ide érkezik')
+        : dep.headsign;
+
+    final platformText = dep.platformCode == null || dep.platformCode!.isEmpty
+        ? null
+        : dep.platformCode!;
+
+    // Countdown in minutes (GREEN / NOW)
+    String countdownStr;
+    if (diffMin >= 0 && diffMin <= 1) {
+      countdownStr = 'NOW';
+    } else if (diffMin > 1 && diffMin < 60) {
+      countdownStr = '$diffMin\'';
+    } else if (isDelayed) {
+      countdownStr = '$displayEstimatedTime (+$delayMin\')';
+    } else {
+      countdownStr = displayEstimatedTime;
+    }
+
+    final schedDt = scheduledTime.isNotEmpty ? _parseDepartureTime(scheduledTime, now) : null;
+    final isSchedPassed = schedDt != null && schedDt.isBefore(now);
+    final shouldStrikethrough = (isDelayed || isSchedPassed) &&
+        scheduledTime.isNotEmpty &&
+        scheduledTime != displayEstimatedTime;
+
+    final rowContent = Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 7),
+      child: Row(
+        children: [
+          // Mode circle icon
+          TransitModeCircleIcon(mode: style.mode, size: 24),
+          const SizedBox(width: 8),
+
+          // Route Number Badge Pill
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 3.5),
+            decoration: BoxDecoration(
+              color: style.bg,
+              borderRadius: BorderRadius.circular(5),
+            ),
+            child: Text(
+              dep.lineName,
+              style: TextStyle(
+                color: style.fg,
+                fontWeight: FontWeight.w800,
+                fontSize: 13,
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+
+          // Warning Disruption Badge !
+          if (isDelayed) ...[
+            Container(
+              width: 18,
+              height: 18,
+              decoration: const BoxDecoration(
+                color: Color(0xFFFFD600),
+                shape: BoxShape.circle,
+              ),
+              child: const Center(
+                child: Text(
+                  '!',
+                  style: TextStyle(
+                    color: Colors.black,
+                    fontWeight: FontWeight.w900,
+                    fontSize: 12,
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(width: 6),
+          ],
+
+          // Low-floor Wheelchair Icon
+          Container(
+            width: 18,
+            height: 18,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              border: Border.all(
+                color: theme.colorScheme.outlineVariant,
+                width: 1.2,
+              ),
+            ),
+            child: Center(
+              child: Icon(
+                Icons.accessible,
+                size: 11,
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+            ),
+          ),
+          const SizedBox(width: 10),
+
+          // Platform code badge (if available)
+          if (platformText != null) ...[
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+              decoration: BoxDecoration(
+                color: theme.colorScheme.surfaceContainerHighest,
+                borderRadius: BorderRadius.circular(4),
+                border: Border.all(
+                  color: theme.colorScheme.outlineVariant.withValues(alpha: 0.6),
+                  width: 0.8,
+                ),
+              ),
+              child: Text(
+                platformText,
+                style: TextStyle(
+                  fontSize: 10.5,
+                  fontWeight: FontWeight.w700,
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+              ),
+            ),
+            const SizedBox(width: 8),
+          ],
+
+          // Realtime delay badge (+Xp or Pontos)
+          if (dep.isRealtime && isDelayed) ...[
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+              decoration: BoxDecoration(
+                color: delayColor.withValues(alpha: 0.15),
+                borderRadius: BorderRadius.circular(4),
+              ),
+              child: Text(
+                '+${delayMin}p',
+                style: TextStyle(
+                  color: delayColor,
+                  fontWeight: FontWeight.w800,
+                  fontSize: 11,
+                ),
+              ),
+            ),
+            const SizedBox(width: 6),
+          ] else if (dep.isRealtime) ...[
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+              decoration: BoxDecoration(
+                color: const Color(0xFF22C55E).withValues(alpha: 0.15),
+                borderRadius: BorderRadius.circular(4),
+              ),
+              child: const Text(
+                'Pontos',
+                style: TextStyle(
+                  color: Color(0xFF16A34A),
+                  fontWeight: FontWeight.w700,
+                  fontSize: 10.5,
+                ),
+              ),
+            ),
+            const SizedBox(width: 6),
+          ],
+
+          // Minutes Countdown (GREEN / NOW)
+          Text(
+            countdownStr,
+            style: const TextStyle(
+              color: Color(0xFF00875A), // Authentic transit green countdown
+              fontWeight: FontWeight.w700,
+              fontSize: 14,
+            ),
+          ),
+          const SizedBox(width: 6),
+
+          if (shouldStrikethrough) ...[
+            Text(
+              scheduledTime,
+              style: TextStyle(
+                color: theme.colorScheme.onSurfaceVariant.withValues(alpha: 0.6),
+                decoration: TextDecoration.lineThrough,
+                fontSize: 11.5,
+              ),
+            ),
+            const SizedBox(width: 4),
+            Text(
+              displayEstimatedTime,
+              style: TextStyle(
+                color: isDelayed ? delayColor : theme.colorScheme.onSurface,
+                fontWeight: FontWeight.w700,
+                fontSize: 12,
+              ),
+            ),
+          ] else ...[
+            Text(
+              displayEstimatedTime,
+              style: TextStyle(
+                color: theme.colorScheme.onSurfaceVariant,
+                fontWeight: FontWeight.w600,
+                fontSize: 12,
+              ),
+            ),
+          ],
+          const SizedBox(width: 10),
+
+          // Destination / Headsign or Origin
+          Expanded(
+            child: Text(
+              destinationText,
+              style: TextStyle(
+                color: theme.colorScheme.onSurface,
+                fontSize: 13.5,
+                fontWeight: FontWeight.w600,
+              ),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+        ],
+      ),
+    );
+
+    if (widget.onDepartureTapped != null) {
+      return InkWell(
+        onTap: () => widget.onDepartureTapped!(dep),
+        borderRadius: BorderRadius.circular(8),
+        child: rowContent,
+      );
+    }
+    return rowContent;
+  }
+
   /// Builds the top route badges bar (row of mode icon + route pills)
   Widget _buildServedRoutesBar(ThemeData theme, List<UnifiedDeparture> departures) {
     final routesSet = <String>{};
-    if (widget.station.servedRoutes != null && widget.station.servedRoutes!.isNotEmpty) {
+    if (_transitFilter == TransitFilter.all &&
+        widget.station.servedRoutes != null &&
+        widget.station.servedRoutes!.isNotEmpty) {
       for (final r in widget.station.servedRoutes!.split(RegExp(r'[,; /]+'))) {
         final trimmed = r.trim();
         if (trimmed.isNotEmpty) routesSet.add(trimmed);
@@ -892,14 +2083,21 @@ class _StationDetailCardState extends ConsumerState<StationDetailCard> {
       routesSet.add(d.lineName);
     }
 
-    if (routesSet.isEmpty) {
+    final filteredRoutes = routesSet.where((route) {
+      final style = resolveRouteBadgeStyle(
+        line: route,
+      );
+      if (_transitFilter == TransitFilter.train && style.mode != 'train') return false;
+      if (_transitFilter == TransitFilter.local && style.mode == 'train') return false;
+      return true;
+    }).toList();
+
+    if (filteredRoutes.isEmpty) {
       return const SizedBox(height: 6);
     }
 
-    final sortedRoutes = routesSet.toList();
     final firstStyle = resolveRouteBadgeStyle(
-      line: sortedRoutes.first,
-      vehicleType: widget.station.vehicleType,
+      line: filteredRoutes.first,
     );
 
     return Padding(
@@ -916,10 +2114,9 @@ class _StationDetailCardState extends ConsumerState<StationDetailCard> {
             child: Wrap(
               spacing: 6,
               runSpacing: 4,
-              children: sortedRoutes.take(7).map((route) {
+              children: filteredRoutes.take(7).map((route) {
                 final style = resolveRouteBadgeStyle(
                   line: route,
-                  vehicleType: widget.station.vehicleType,
                 );
                 return Container(
                   padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
@@ -944,15 +2141,27 @@ class _StationDetailCardState extends ConsumerState<StationDetailCard> {
     );
   }
 
-  DateTime _parseDepartureTime(String hhmm, DateTime now) {
+  DateTime _parseDepartureTime(String timeStr, DateTime now) {
     try {
-      final parts = hhmm.split(':');
+      final trimmed = timeStr.trim();
+      final iso = DateTime.tryParse(trimmed);
+      if (iso != null) return iso;
+
+      final parts = trimmed.split(':');
       if (parts.length >= 2) {
         final h = int.parse(parts[0]);
         final m = int.parse(parts[1]);
-        return DateTime(now.year, now.month, now.day, h, m);
+        var dt = DateTime(now.year, now.month, now.day, h, m);
+        // Only cross over midnight if it's late night (>= 20:00) and the departure is early morning (< 05:00)
+        if (now.hour >= 20 && h < 5) {
+          dt = dt.add(const Duration(days: 1));
+        } else if (now.hour < 5 && h >= 20) {
+          dt = dt.subtract(const Duration(days: 1));
+        }
+        return dt;
       }
     } catch (_) {}
     return now.add(const Duration(minutes: 5));
   }
 }
+

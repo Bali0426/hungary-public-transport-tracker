@@ -39,6 +39,56 @@ pub fn clean_station_name(name: &str) -> String {
     }
 }
 
+/// Normalizes a station name to its core comparison token (e.g. "Budapest-Déli" -> "déli",
+/// "Déli pályaudvar M" -> "déli", "Kőbánya alsó vasútállomás" -> "kőbánya alsó").
+pub fn normalize_station_core_name(name: &str) -> String {
+    let base = clean_station_name(name).to_lowercase();
+    let base = base.split('/').next().unwrap_or(&base).trim();
+    let mut s = base
+        .trim_start_matches("budapest-")
+        .trim_start_matches("budapest ")
+        .trim()
+        .to_string();
+    for suffix in &[
+        " vasútállomás",
+        " pályaudvar",
+        " pu.",
+        " vá.",
+        " pu",
+        " vá",
+        " m+h",
+        " m",
+        " h",
+    ] {
+        if s.ends_with(suffix) {
+            s.truncate(s.len() - suffix.len());
+            s = s.trim().to_string();
+        }
+    }
+    s
+}
+
+/// Normalizes a raw MÁV stop ID (e.g. "MAV:1:005510447_4a", "MAV:1:v.005501024_0") to its parent OTP2 gtfsId ("1:005510447_0").
+pub fn normalize_mav_otp2_id(raw_id: &str) -> String {
+    let mut s = raw_id.trim();
+    for prefix in &["STOP:", "HUB:", "MAV_", "MAV:"] {
+        if let Some(stripped) = s.strip_prefix(prefix) {
+            s = stripped;
+        }
+    }
+    let owned = if let Some(rest) = s.strip_prefix("1:v.") {
+        format!("1:{}", rest)
+    } else {
+        s.to_string()
+    };
+    if owned.starts_with("1:") {
+        if let Some(idx) = owned.rfind('_') {
+            return format!("{}_0", &owned[..idx]);
+        }
+    }
+    owned
+}
+
 /// Clusters Budapest and national station hubs that share the same base station name
 /// and are within 400 meters of each other into a single canonical station hub.
 fn build_canonical_hub_mappings(
@@ -322,8 +372,12 @@ impl StaticTransitRepository {
                 END AS operator_type,
                 MIN(s.platform_code) AS platform_code,
                 CASE
-                    WHEN MAX(h.has_bkk AND h.has_mav) = 1 THEN 1
+                    WHEN MAX(h.has_bkk = 1 AND h.has_mav = 1) = 1 THEN 1
+                    WHEN MAX(s.operator_type = 'MAV') = 1 AND MAX(s.operator_type = 'BKK') = 1 THEN 1
                     WHEN s.name LIKE '%pályaudvar%' OR s.name LIKE '%vasútállomás%' THEN 1
+                    WHEN s.name LIKE '%Keleti%' OR s.name LIKE '%Nyugati%' OR s.name LIKE '%Déli%'
+                         OR s.name LIKE '%Kelenföld%' OR s.name LIKE '%Kőbánya-Kispest%'
+                         OR s.name LIKE '%Zugló%' OR s.name LIKE '%Ferihegy%' THEN 1
                     ELSE 0
                 END AS is_multimodal,
                 GROUP_CONCAT(d.served_routes, ', ') AS served_routes,
@@ -358,6 +412,28 @@ impl StaticTransitRepository {
                 .and_then(|h| self.get_hub_display_name(h))
                 .unwrap_or_else(|| clean_station_name(&raw_name));
             let is_mm: i64 = row.get(7)?;
+            let is_mm_name = {
+                let n1 = raw_name.to_lowercase();
+                let n2 = disp_name.to_lowercase();
+                n1.contains("keleti")
+                    || n1.contains("nyugati")
+                    || n1.contains("déli")
+                    || n1.contains("kelenföld")
+                    || n1.contains("kőbánya-kispest")
+                    || n1.contains("zugló")
+                    || n1.contains("ferihegy")
+                    || n1.contains("pályaudvar")
+                    || n1.contains("vasútállomás")
+                    || n2.contains("keleti")
+                    || n2.contains("nyugati")
+                    || n2.contains("déli")
+                    || n2.contains("kelenföld")
+                    || n2.contains("kőbánya-kispest")
+                    || n2.contains("zugló")
+                    || n2.contains("ferihegy")
+                    || n2.contains("pályaudvar")
+                    || n2.contains("vasútállomás")
+            };
             let raw_routes: Option<String> = row.get(8)?;
             let v_type: Option<String> = row.get(9)?;
             let node_id = canon_hub.clone().unwrap_or_else(|| row.get(0).unwrap_or_default());
@@ -370,7 +446,7 @@ impl StaticTransitRepository {
                 lon: row.get(4)?,
                 operator: Operator::from_prefix(&op_str),
                 platform_code: row.get(6)?,
-                is_multimodal_hub: is_mm != 0,
+                is_multimodal_hub: is_mm != 0 || is_mm_name,
                 vehicle_type: v_type,
                 served_routes: raw_routes,
                 direction: None,
@@ -414,6 +490,142 @@ impl StaticTransitRepository {
             }
         }
         Ok(results)
+    }
+
+    /// Resolves a MÁV OTP2 station gtfsId (e.g. "1:005501016_0") directly from the local SQLite `stops` table
+    /// by stop ID, coordinate proximity (~650m), or normalized station name.
+    pub fn resolve_mav_stop_id_from_db(&self, stop_or_hub_id: &str) -> Option<String> {
+        if let Some(sync_id) = crate::gtfs_rt::mav::resolve_mav_otp2_stop_id_sync(stop_or_hub_id) {
+            return Some(sync_id.to_string());
+        }
+
+        let conn = self.get_conn().ok()?;
+        let mut query_name = String::new();
+        let mut query_coords: Option<(f64, f64)> = None;
+
+        if let Some(payload) = stop_or_hub_id.strip_prefix("GROUP:") {
+            let parts: Vec<&str> = payload.rsplitn(3, ':').collect();
+            if parts.len() == 3 {
+                if let (Ok(lon), Ok(lat)) = (parts[0].parse::<f64>(), parts[1].parse::<f64>()) {
+                    query_name = parts[2].to_string();
+                    if lat > 1.0 && lon > 1.0 {
+                        query_coords = Some((lat, lon));
+                    }
+                } else {
+                    query_name = payload.to_string();
+                }
+            } else {
+                query_name = payload.to_string();
+            }
+        } else {
+            let unprefix = crate::gtfs_rt::mav::strip_transit_prefixes(stop_or_hub_id.trim());
+            if unprefix.starts_with("1:") && !unprefix.starts_with("1:0036") {
+                return Some(normalize_mav_otp2_id(unprefix));
+            }
+            let p1 = unprefix.to_string();
+            let p2 = format!("MAV:{}", unprefix);
+            let p3 = format!("BKK:{}", unprefix);
+            let p4 = format!("HUB:{}", unprefix);
+            let p5 = format!("HUB:MAV_{}", unprefix);
+            if let Ok(mut stmt) = conn.prepare_cached(
+                "SELECT id, name, lat, lon, operator_type FROM stops WHERE id IN (?1, ?2, ?3) OR hub_id IN (?1, ?4, ?5) ORDER BY (operator_type = 'MAV') DESC LIMIT 1",
+            ) {
+                if let Ok(Some((id, name, lat, lon, op))) = stmt
+                    .query_row(params![p1, p2, p3, p4, p5], |r| {
+                        Ok((
+                            r.get::<_, String>(0)?,
+                            r.get::<_, String>(1)?,
+                            r.get::<_, f64>(2)?,
+                            r.get::<_, f64>(3)?,
+                            r.get::<_, String>(4)?,
+                        ))
+                    })
+                    .optional()
+                {
+                    if op == "MAV" && !id.starts_with("MAV:1:0036") {
+                        return Some(normalize_mav_otp2_id(&id));
+                    }
+                    query_name = name;
+                    if lat > 1.0 && lon > 1.0 {
+                        query_coords = Some((lat, lon));
+                    }
+                }
+            }
+        }
+
+        if !query_name.is_empty() {
+            if let Some(sync_id) = crate::gtfs_rt::mav::resolve_mav_otp2_stop_id_sync(&query_name) {
+                return Some(sync_id.to_string());
+            }
+        }
+
+        let target_core = normalize_station_core_name(&query_name);
+        let q_lower = query_name.to_lowercase();
+        let has_rail_keyword = q_lower.contains("vasútállomás")
+            || q_lower.contains("pályaudvar")
+            || q_lower.contains("vá.")
+            || q_lower.contains("pu.");
+
+        // 1. Coordinate proximity lookup (~650m around stop/hub)
+        if let Some((lat, lon)) = query_coords {
+            if let Ok(mut stmt) = conn.prepare_cached(
+                r#"
+                SELECT id, name, lat, lon
+                FROM stops
+                WHERE operator_type = 'MAV'
+                  AND id NOT LIKE 'MAV:1:0036%'
+                  AND lat BETWEEN ?1 AND ?2
+                  AND lon BETWEEN ?3 AND ?4
+                ORDER BY (id LIKE 'MAV:1:0055%') DESC, ((lat - ?5)*(lat - ?5) + (lon - ?6)*(lon - ?6)) ASC
+                "#,
+            ) {
+                if let Ok(rows) = stmt.query_map(
+                    params![lat - 0.006, lat + 0.006, lon - 0.008, lon + 0.008, lat, lon],
+                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+                ) {
+                    let candidates: Vec<(String, String)> = rows.flatten().collect();
+                    for (mid, mname) in &candidates {
+                        let m_core = normalize_station_core_name(mname);
+                        if !target_core.is_empty() && !m_core.is_empty() && m_core == target_core {
+                            return Some(normalize_mav_otp2_id(mid));
+                        }
+                    }
+                    if has_rail_keyword {
+                        if let Some((mid, _)) = candidates.first() {
+                            return Some(normalize_mav_otp2_id(mid));
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. Exact / normalized station name lookup in SQLite `stops`
+        if !target_core.is_empty() {
+            let like_pat = format!("%{}%", target_core);
+            if let Ok(mut stmt) = conn.prepare_cached(
+                r#"
+                SELECT id, name
+                FROM stops
+                WHERE operator_type = 'MAV'
+                  AND id NOT LIKE 'MAV:1:0036%'
+                  AND name LIKE ?1 COLLATE NOCASE
+                ORDER BY (id LIKE 'MAV:1:0055%') DESC, LENGTH(name) ASC
+                "#,
+            ) {
+                if let Ok(rows) = stmt.query_map(params![like_pat], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                }) {
+                    for (mid, mname) in rows.flatten() {
+                        let m_core = normalize_station_core_name(&mname);
+                        if m_core == target_core {
+                            return Some(normalize_mav_otp2_id(&mid));
+                        }
+                    }
+                }
+            }
+        }
+
+        None
     }
 
     /// Queries the unified departure board for either a specific `stop_id` or an entire multimodal `hub_id`
@@ -471,11 +683,14 @@ impl StaticTransitRepository {
                 })?;
 
                 let target_clean = clean_station_name(&clean_name).to_lowercase();
+                let target_core = normalize_station_core_name(&clean_name);
                 for r in rows {
                     let (id, hub_id, name) = r?;
                     let c_name = clean_station_name(&name).to_lowercase();
+                    let c_core = normalize_station_core_name(&name);
                     let name_lower = name.to_lowercase();
                     if c_name == target_clean
+                        || (!target_core.is_empty() && c_core == target_core)
                         || name_lower.starts_with(&target_clean)
                         || target_clean.starts_with(&c_name)
                     {
@@ -503,11 +718,14 @@ impl StaticTransitRepository {
                 })?;
 
                 let target_clean = clean_station_name(&clean_name).to_lowercase();
+                let target_core = normalize_station_core_name(&clean_name);
                 for r in rows {
                     let (id, hub_id, name) = r?;
                     let c_name = clean_station_name(&name).to_lowercase();
+                    let c_core = normalize_station_core_name(&name);
                     let name_lower = name.to_lowercase();
                     if c_name == target_clean
+                        || (!target_core.is_empty() && c_core == target_core)
                         || name_lower.starts_with(&target_clean)
                         || target_clean.starts_with(&c_name)
                     {
@@ -556,14 +774,30 @@ impl StaticTransitRepository {
             stop_ids.sort();
             stop_ids.dedup();
             ("s.id", stop_ids)
-        } else if stop_or_hub_id.starts_with("HUB:") {
-            let canonical_hub = self.resolve_canonical_hub_id(stop_or_hub_id);
+        } else if stop_or_hub_id.starts_with("HUB:")
+            || stop_or_hub_id.starts_with("STOP:HUB:")
+            || (stop_or_hub_id.strip_prefix("STOP:").unwrap_or(stop_or_hub_id).len() == 6
+                && stop_or_hub_id.strip_prefix("STOP:").unwrap_or(stop_or_hub_id).chars().all(|c| c.is_ascii_digit()))
+        {
+            let unprefix = stop_or_hub_id.strip_prefix("STOP:").unwrap_or(stop_or_hub_id);
+            let canonical_hub = self.resolve_canonical_hub_id(unprefix);
             let member_hubs = self.get_hub_members(&canonical_hub);
             ("s.hub_id", member_hubs)
         } else {
             // Single stop / platform query: STRICTLY filter by s.id, DO NOT resolve to hub_id!
             let stop_id = stop_or_hub_id.strip_prefix("STOP:").unwrap_or(stop_or_hub_id);
-            ("s.id", vec![stop_id.to_string()])
+            let mut ids = vec![stop_id.to_string()];
+            if let Some(stripped) = stop_id.strip_prefix("BKK:") {
+                ids.push(stripped.to_string());
+                ids.push(format!("BKK_{}", stripped));
+            } else if let Some(stripped) = stop_id.strip_prefix("BKK_") {
+                ids.push(stripped.to_string());
+                ids.push(format!("BKK:{}", stripped));
+            } else {
+                ids.push(format!("BKK:{}", stop_id));
+                ids.push(format!("BKK_{}", stop_id));
+            }
+            ("s.id", ids)
         };
 
         if filter_values.is_empty() {
@@ -815,10 +1049,11 @@ pub fn dedup_route_str(routes: &str) -> String {
 }
 
 pub fn format_hhmm(seconds: i32, fallback: &str) -> String {
-    if seconds < 0 {
+    if seconds <= 0 && fallback == "--:--" {
         return fallback.to_string();
     }
-    let total_minutes = (seconds / 60) % (24 * 60);
+    let normalized = (seconds % 86400 + 86400) % 86400;
+    let total_minutes = normalized / 60;
     let h = total_minutes / 60;
     let m = total_minutes % 60;
     format!("{:02}:{:02}", h, m)
@@ -905,7 +1140,11 @@ mod tests {
             );
             if let Ok(deps) = single_res {
                 for d in &deps {
-                    assert_eq!(d.stop_id, "BKK_F01007", "Single stop query must strictly return departures for BKK_F01007");
+                    assert!(
+                        d.stop_id == "BKK_F01007" || d.stop_id == "BKK:F01007",
+                        "Single stop query must strictly return departures for F01007, got {}",
+                        d.stop_id
+                    );
                 }
             }
 
@@ -920,5 +1159,45 @@ mod tests {
             );
             assert!(group_res.is_ok(), "GROUP departures query should succeed");
         }
+    }
+
+    #[test]
+    fn test_live_nyugati_get_station_departure_board() {
+        let _ = crate::api::init_engine(
+            "../assets/db/transit_static.db".to_string(),
+            None,
+            None,
+        );
+        let deps = crate::api::get_station_departure_board(
+            "GROUP:Nyugati pályaudvar:47.5106:19.0573".to_string(),
+            90,
+            50,
+        ).unwrap();
+        println!("TOTAL DEPARTURES: {}", deps.len());
+        let mav_count = deps.iter().filter(|d| d.operator == crate::gtfs_rt::models::Operator::MAV).count();
+        let bkk_count = deps.iter().filter(|d| d.operator == crate::gtfs_rt::models::Operator::BKK).count();
+        println!("MAV COUNT: {}, BKK COUNT: {}", mav_count, bkk_count);
+        for d in deps.iter().filter(|d| d.operator == crate::gtfs_rt::models::Operator::MAV).take(5) {
+            println!("  MAV: {} -> {} at {}", d.line_name, d.headsign, d.scheduled_time_formatted);
+        }
+    }
+
+    #[test]
+    fn test_otp2_platforms() {
+        let _ = crate::api::init_engine(
+            "../assets/db/transit_static.db".to_string(),
+            None,
+            None,
+        );
+        let nyugati_deps = crate::api::get_station_departure_board("STOP:MAV:1:005510033_5".to_string(), 90, 50).unwrap();
+        assert!(!nyugati_deps.is_empty(), "Nyugati departures must not be empty");
+        let keleti_deps = crate::api::get_station_departure_board("GROUP:Budapest-Keleti:47.500:19.083".to_string(), 90, 50).unwrap();
+        assert!(!keleti_deps.is_empty(), "Keleti departures must not be empty");
+        let deli_deps = crate::api::get_station_departure_board("GROUP:Déli pályaudvar:47.500:19.025".to_string(), 90, 50).unwrap();
+        assert!(!deli_deps.is_empty(), "Déli departures must not be empty");
+        let kelenfold_deps = crate::api::get_station_departure_board("GROUP:Kelenföld vasútállomás:47.464:19.021".to_string(), 90, 50).unwrap();
+        assert!(!kelenfold_deps.is_empty(), "Kelenföld departures must not be empty");
+        let blaha_deps = crate::api::get_station_departure_board("STOP:HUB:000323".to_string(), 90, 50).unwrap();
+        assert!(!blaha_deps.is_empty(), "Blaha departures must not be empty");
     }
 }

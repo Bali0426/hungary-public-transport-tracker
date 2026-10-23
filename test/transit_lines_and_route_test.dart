@@ -2,8 +2,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hungary_public_transport_tracker/bridge/bridge_generated.dart';
+import 'package:hungary_public_transport_tracker/providers/live_vehicles_provider.dart';
 import 'package:hungary_public_transport_tracker/providers/timetable_provider.dart';
 import 'package:hungary_public_transport_tracker/providers/transit_lines_provider.dart';
+import 'package:latlong2/latlong.dart';
 
 void main() {
   group('State Providers Default & Mutation Tests', () {
@@ -16,6 +18,12 @@ void main() {
       expect(container.read(showMetroLinesProvider), isFalse);
       expect(container.read(showTramLinesProvider), isFalse);
       expect(container.read(showHevLinesProvider), isFalse);
+      expect(container.read(openRailwayMapStyleProvider), equals(OpenRailwayMapStyle.standard));
+
+      container.read(openRailwayMapStyleProvider.notifier).state = OpenRailwayMapStyle.maxspeed;
+      expect(container.read(openRailwayMapStyleProvider), equals(OpenRailwayMapStyle.maxspeed));
+      expect(OpenRailwayMapStyle.maxspeed.tileUrl, contains('maxspeed'));
+      expect(OpenRailwayMapStyle.maxspeed.labelHu, contains('Sebesség'));
 
       container.read(showMetroLinesProvider.notifier).state = true;
       expect(container.read(showMetroLinesProvider), isTrue);
@@ -223,6 +231,167 @@ void main() {
       expect(points[0].latitude, closeTo(47.496, 0.001));
       expect(points[1].latitude, closeTo(47.505, 0.001));
       expect(points[2].latitude, closeTo(47.519, 0.001));
+    });
+
+    test('returns dense track-aligned points for MÁV railway trip (more points than stop count)', () async {
+      final container = ProviderContainer(
+        overrides: [
+          tripScheduleProvider.overrideWith((ref, tripId) async {
+            return [
+              const TripStopSchedule(
+                stopSequence: 1,
+                stopId: 'CS_005510009',
+                stopName: 'Budapest-Keleti',
+                departureTime: '08:00',
+                operator: 'MAV',
+                lat: 47.5004,
+                lon: 19.0838,
+              ),
+              const TripStopSchedule(
+                stopSequence: 2,
+                stopId: 'CS_005510405',
+                stopName: 'Tatabánya',
+                departureTime: '08:45',
+                operator: 'MAV',
+                lat: 47.5850,
+                lon: 18.3970,
+              ),
+              const TripStopSchedule(
+                stopSequence: 3,
+                stopId: 'CS_005510801',
+                stopName: 'Győr',
+                departureTime: '09:20',
+                operator: 'MAV',
+                lat: 47.6830,
+                lon: 17.6350,
+              ),
+            ];
+          }),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      final points = await container.read(vehicleRoutePolylineProvider('MAV:IC_920').future);
+
+      // Verify that dense points along the track corridor are returned, far exceeding the 3 stop points!
+      expect(points.length, greaterThan(3));
+      expect(points.length, greaterThanOrEqualTo(15));
+
+      // The line starts at Keleti and ends at Győr
+      expect(points.first.latitude, closeTo(47.5004, 0.01));
+      expect(points.first.longitude, closeTo(19.0838, 0.01));
+      expect(points.last.latitude, closeTo(47.6830, 0.01));
+      expect(points.last.longitude, closeTo(17.6350, 0.01));
+    });
+
+    test('returns dense track-aligned points for HÉV suburban train trips', () async {
+      final container = ProviderContainer(
+        overrides: [
+          tripScheduleProvider.overrideWith((ref, tripId) async {
+            return [
+              const TripStopSchedule(
+                stopSequence: 1,
+                stopId: 'BKK_00551',
+                stopName: 'Batthyány tér H',
+                departureTime: '12:00',
+                operator: 'BKK',
+                lat: 47.5067,
+                lon: 19.0393,
+              ),
+              const TripStopSchedule(
+                stopSequence: 2,
+                stopId: 'BKK_00559',
+                stopName: 'Szentendre H',
+                departureTime: '12:40',
+                operator: 'BKK',
+                lat: 47.6610,
+                lon: 19.0756,
+              ),
+            ];
+          }),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      final points = await container.read(vehicleRoutePolylineProvider('BKK:H5_TRIP_01').future);
+
+      // Even with only 2 terminus stops, track corridor interpolation gives full curve coordinates!
+      expect(points.length, greaterThan(2));
+      expect(points.length, greaterThanOrEqualTo(10));
+      expect(points.first.latitude, closeTo(47.5067, 0.01));
+      expect(points.last.latitude, closeTo(47.6610, 0.01));
+    });
+
+    test('uses direct trip geometry when registered in TransitRouteGeometry (e.g. trip.pattern.geometry)', () async {
+      final directPoints = [
+        const LatLng(47.5000, 19.0000),
+        const LatLng(47.5100, 19.0100),
+        const LatLng(47.5200, 19.0200),
+        const LatLng(47.5300, 19.0300),
+      ];
+
+      TransitRouteGeometry.registerDirectTripGeometry('MAV_DIRECT_GEOM_TRIP', directPoints);
+      addTearDown(TransitRouteGeometry.clearDirectTripGeometries);
+
+      final container = ProviderContainer(
+        overrides: [
+          tripScheduleProvider.overrideWith((ref, tripId) async {
+            // Even if schedule has completely different coarse points, direct geometry takes precedence!
+            return [
+              const TripStopSchedule(
+                stopSequence: 1,
+                stopId: 'STOP_1',
+                stopName: 'Coarse 1',
+                departureTime: '10:00',
+                operator: 'MAV',
+                lat: 47.0,
+                lon: 19.0,
+              ),
+              const TripStopSchedule(
+                stopSequence: 2,
+                stopId: 'STOP_2',
+                stopName: 'Coarse 2',
+                departureTime: '11:00',
+                operator: 'MAV',
+                lat: 48.0,
+                lon: 20.0,
+              ),
+            ];
+          }),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      final result = await container.read(vehicleRoutePolylineProvider('MAV_DIRECT_GEOM_TRIP').future);
+      expect(result, equals(directPoints));
+    });
+
+    test('TransitRouteGeometry.fitToRailwayTracks correctly interpolates main rail corridors', () {
+      // Budapest-Nyugati to Debrecen
+      final stops = [
+        const LatLng(47.5109, 19.0569), // Nyugati
+        const LatLng(47.1680, 20.1800), // Szolnok
+        const LatLng(47.5210, 21.6250), // Debrecen
+      ];
+
+      final fitted = TransitRouteGeometry.fitToRailwayTracks(stops);
+      expect(fitted.length, greaterThan(3));
+      expect(fitted.length, greaterThanOrEqualTo(15));
+      expect(fitted.first.latitude, closeTo(47.5109, 0.01));
+      expect(fitted.last.latitude, closeTo(47.5210, 0.01));
+    });
+
+    test('showLiveVehiclesProvider master toggle enables or disables vehicle rendering', () {
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+
+      expect(container.read(showLiveVehiclesProvider), isTrue);
+      expect(container.read(enabledTransitModesProvider), contains('metro'));
+
+      container.read(showLiveVehiclesProvider.notifier).state = false;
+      expect(container.read(showLiveVehiclesProvider), isFalse);
+      // Mode is still configured
+      expect(container.read(enabledTransitModesProvider), contains('metro'));
     });
   });
 }

@@ -132,6 +132,49 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     });
   }
 
+  Map<String, dynamic> _departureToProps(UnifiedDeparture dep) {
+    for (final feat in _cachedFeatures) {
+      final p = feat['properties'] as Map<String, dynamic>?;
+      if (p != null) {
+        final tId = p['trip_id']?.toString();
+        if (tId != null && tId.isNotEmpty && tId == dep.tripId) {
+          return Map<String, dynamic>.from(p);
+        }
+      }
+    }
+
+    final isTrain = dep.operator == Operator.mav;
+    final mins = (dep.delaySeconds / 60).round();
+    final delayBucket = mins > 5
+        ? 'major_delay'
+        : (mins > 2 ? 'minor_delay' : 'on_time');
+
+    final modeStyle = resolveRouteBadgeStyle(line: dep.lineName);
+
+    return {
+      'id': dep.tripId,
+      'trip_id': dep.tripId,
+      'line_name': dep.lineName,
+      'trip_short_name': dep.lineName,
+      'destination': dep.headsign,
+      'operator': isTrain ? 'MAV' : 'BKK',
+      'vehicle_type': isTrain ? 'train' : modeStyle.mode,
+      'delay_seconds': dep.delaySeconds,
+      'delay_bucket': delayBucket,
+      'delay_cause': dep.delaySeconds > 120 ? 'Menetrendi eltérés / Forgalmi ok' : '',
+      'is_realtime': dep.isRealtime,
+      'platform': dep.platformCode,
+      'speed_kmh': 0,
+    };
+  }
+
+  void _onDepartureTapped(UnifiedDeparture dep) {
+    final props = _departureToProps(dep);
+    setState(() {
+      _selectedVehicle = props;
+    });
+  }
+
   void _onSearchVehicleSelected(Map<String, dynamic> props) {
     final lat = (props['lat'] as num?)?.toDouble() ?? 0.0;
     final lon = (props['lon'] as num?)?.toDouble() ?? 0.0;
@@ -634,6 +677,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
   @override
   Widget build(BuildContext context) {
     final liveVehiclesAsync = ref.watch(liveVehiclesGeoJsonProvider);
+    final showLiveVehicles = ref.watch(showLiveVehiclesProvider);
     final stopGroupsAsync = ref.watch(viewportStopGroupsProvider);
     final platformsAsync = ref.watch(viewportPlatformsProvider);
     final enabledModes = ref.watch(enabledTransitModesProvider);
@@ -641,6 +685,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     final showStopGroups = ref.watch(showStopGroupsProvider);
     final showPlatforms = ref.watch(showPlatformsProvider);
     final showOpenRailwayMap = ref.watch(showOpenRailwayMapProvider);
+    final railwayStyle = ref.watch(openRailwayMapStyleProvider);
     final showRailwayLines = ref.watch(showRailwayLinesProvider);
     final showMetroLines = ref.watch(showMetroLinesProvider);
     final showHevLines = ref.watch(showHevLinesProvider);
@@ -653,7 +698,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
         : const <LatLng>[];
 
     Polyline? selectedVehicleRoutePolyline;
-    if (_selectedVehicle != null && selectedRouteCoords.length >= 2) {
+    if (showLiveVehicles && _selectedVehicle != null && selectedRouteCoords.length >= 2) {
       final vType = _selectedVehicle?['vehicle_type']?.toString().toLowerCase() ?? 'bus';
       final modeColor = getModeBadgeColor(vType);
       selectedVehicleRoutePolyline = Polyline(
@@ -674,7 +719,9 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     ];
 
     final geojson = liveVehiclesAsync.valueOrNull ?? '';
-    final vehicleMarkers = _buildVehicleMarkers(geojson, enabledModes, _currentZoom, isDarkMode);
+    final vehicleMarkers = (showLiveVehicles && geojson.isNotEmpty)
+        ? _buildVehicleMarkers(geojson, enabledModes, _currentZoom, isDarkMode)
+        : const <Marker>[];
 
     // Calculate vehicles visible in current camera viewport
     int renderedCount = 0;
@@ -777,10 +824,31 @@ class _MapScreenState extends ConsumerState<MapScreen> {
 
               // OpenRailwayMap railway infrastructure overlay tile layer
               if (showOpenRailwayMap)
-                TileLayer(
-                  urlTemplate: 'https://{s}.tiles.openrailwaymap.org/standard/{z}/{x}/{y}.png',
-                  subdomains: const ['a', 'b', 'c'],
-                  userAgentPackageName: 'hungary.public.transport.tracker',
+                ColorFiltered(
+                  colorFilter: isDarkMode
+                      ? const ColorFilter.matrix(<double>[
+                          -1.0, 0.0, 0.0, 0.0, 255.0,
+                          0.0, -1.0, 0.0, 0.0, 255.0,
+                          0.0, 0.0, -1.0, 0.0, 255.0,
+                          0.0, 0.0, 0.0, 1.0, 0.0,
+                        ])
+                      : const ColorFilter.mode(
+                          Colors.transparent,
+                          BlendMode.dst,
+                        ),
+                  child: TileLayer(
+                    urlTemplate: railwayStyle.tileUrlTemplate,
+                    subdomains: const ['a', 'b', 'c'],
+                    userAgentPackageName: 'hungary.public.transport.tracker',
+                    tileBuilder: (context, tileWidget, tile) {
+                      return DecoratedBox(
+                        decoration: const BoxDecoration(
+                          color: Colors.transparent,
+                        ),
+                        child: tileWidget,
+                      );
+                    },
+                  ),
                 ),
 
               // 1. Shaded Enclosure Boundary Polygons for Stop Groups ("station_hull", BudapestGO)
@@ -913,28 +981,60 @@ class _MapScreenState extends ConsumerState<MapScreen> {
 
           // Top-Right Selected Detail Cards
           if (_selectedVehicle != null || _selectedStation != null)
-            Positioned(
-              top: MediaQuery.of(context).padding.top + 14,
-              right: 16,
-              child: ConstrainedBox(
-                constraints: BoxConstraints(
-                  maxWidth: math.min(
-                    440,
-                    MediaQuery.sizeOf(context).width - 32,
+            Builder(
+              builder: (ctx) {
+                final screenWidth = MediaQuery.sizeOf(ctx).width;
+                final availableHeight = MediaQuery.sizeOf(ctx).height -
+                    (MediaQuery.of(ctx).padding.top + 90);
+                final canShowBothSideBySide = _selectedVehicle != null &&
+                    _selectedStation != null &&
+                    screenWidth >= 880;
+
+                final cardWidth = canShowBothSideBySide
+                    ? math.min(430.0, (screenWidth - 48) / 2)
+                    : math.min(440.0, screenWidth - 32);
+
+                return Positioned(
+                  top: MediaQuery.of(ctx).padding.top + 14,
+                  right: 16,
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      // Vehicle Detail Card (positioned to the left of the station card)
+                      if (_selectedVehicle != null) ...[
+                        ConstrainedBox(
+                          constraints: BoxConstraints(
+                            maxWidth: cardWidth,
+                            maxHeight: availableHeight,
+                          ),
+                          child: VehicleDetailCard(
+                            props: _selectedVehicle!,
+                            onClose: () => setState(() => _selectedVehicle = null),
+                          ),
+                        ),
+                        if (canShowBothSideBySide) const SizedBox(width: 14),
+                      ],
+
+                      // Station Detail Card
+                      if (_selectedStation != null &&
+                          (_selectedVehicle == null || canShowBothSideBySide))
+                        ConstrainedBox(
+                          constraints: BoxConstraints(
+                            maxWidth: cardWidth,
+                            maxHeight: availableHeight,
+                          ),
+                          child: StationDetailCard(
+                            key: ValueKey(_selectedStation!.id),
+                            station: _selectedStation!,
+                            onClose: () => setState(() => _selectedStation = null),
+                            onDepartureTapped: _onDepartureTapped,
+                          ),
+                        ),
+                    ],
                   ),
-                  maxHeight: MediaQuery.sizeOf(context).height -
-                      (MediaQuery.of(context).padding.top + 90),
-                ),
-                child: _selectedVehicle != null
-                    ? VehicleDetailCard(
-                        props: _selectedVehicle!,
-                        onClose: () => setState(() => _selectedVehicle = null),
-                      )
-                    : StationDetailCard(
-                        station: _selectedStation!,
-                        onClose: () => setState(() => _selectedStation = null),
-                      ),
-              ),
+                );
+              },
             ),
         ],
       ),

@@ -83,7 +83,7 @@ void main() {
   });
 
   group('Map Layers Floating Menu 2-column mode toggles', () {
-    testWidgets('renders all 7 modes in 2 columns with neutral toggles', (tester) async {
+    testWidgets('renders all 7 modes in 2 columns with neutral toggles and master toggle', (tester) async {
       await tester.pumpWidget(
         ProviderScope(
           child: MaterialApp(
@@ -101,6 +101,10 @@ void main() {
       );
 
       expect(find.text('KÖZLEKEDÉSI MÓDOK'), findsOneWidget);
+      // Master toggle exists with same size/style as stops switches
+      expect(find.text('Járművek réteg'), findsOneWidget);
+      expect(find.text('Mind'), findsNothing);
+      expect(find.byIcon(Icons.select_all), findsNothing);
       expect(find.text('Busz'), findsOneWidget);
       expect(find.text('Villamos'), findsOneWidget);
       expect(find.text('Metró'), findsOneWidget);
@@ -108,8 +112,68 @@ void main() {
       expect(find.text('MÁV Vonat'), findsOneWidget);
       expect(find.text('HÉV'), findsOneWidget);
       expect(find.text('Hajó'), findsOneWidget);
+
+      // Metro badges rendered without overflow
+      expect(find.text('Metróvonalak'), findsOneWidget);
+      expect(find.text('M1'), findsOneWidget);
+      expect(find.text('M2'), findsOneWidget);
+      expect(find.text('M3'), findsOneWidget);
+      expect(find.text('M4'), findsOneWidget);
+
+      // Verify "Vasúti vonalak" is removed
+      expect(find.text('Vasúti vonalak'), findsNothing);
+
+      // Verify OpenRailwayMap card
+      expect(find.text('OpenRailwayMap Vasúti Térkép'), findsOneWidget);
+
       // Ensure no checkmarks exist
       expect(find.byIcon(Icons.check), findsNothing);
+    });
+
+    testWidgets('OpenRailwayMap expands inline with style selector and large toggle', (tester) async {
+      await tester.pumpWidget(
+        ProviderScope(
+          child: MaterialApp(
+            home: Scaffold(
+              body: SizedBox(
+                width: 320,
+                height: 600,
+                child: MapLayersFloatingMenu(
+                  onClose: () {},
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+
+      // Initially inline styles are collapsed
+      expect(find.text('Térkép stílusa:'), findsNothing);
+
+      // Tap on OpenRailwayMap card to expand inline downward
+      await tester.tap(find.text('OpenRailwayMap Vasúti Térkép'));
+      await tester.pumpAndSettle();
+
+      // Check inline styles content
+      expect(find.text('Térkép stílusa:'), findsOneWidget);
+      expect(find.text('Infrastructure (Vasúti pálya)'), findsOneWidget);
+      expect(find.text('Max speeds (Pályasebesség)'), findsOneWidget);
+      expect(find.text('Signalling and train protection (Jelzők & Biztosítóberendezés)'), findsOneWidget);
+      expect(find.text('Electrification (Villamosítás)'), findsOneWidget);
+      expect(find.text('Track gauge (Nyomtáv)'), findsOneWidget);
+
+      // Metróvonalak is still present (pushed down, not obscured)
+      expect(find.text('Metróvonalak'), findsOneWidget);
+
+      // Select another style inline
+      await tester.tap(find.text('Max speeds (Pályasebesség)'));
+      await tester.pumpAndSettle();
+
+      // Tap again to collapse inline
+      await tester.tap(find.text('OpenRailwayMap Vasúti Térkép'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Térkép stílusa:'), findsNothing);
     });
   });
 

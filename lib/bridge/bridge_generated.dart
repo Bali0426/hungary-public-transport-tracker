@@ -107,6 +107,9 @@ class StopNode {
   }
 }
 
+final _originStationExpando = Expando<String>();
+final _arrivalTimeExpando = Expando<String>();
+
 class UnifiedDeparture {
   final String tripId;
   final String stopId;
@@ -122,6 +125,18 @@ class UnifiedDeparture {
   final String estimatedTimeFormatted;
   final bool isRealtime;
   final String? platformCode;
+  final bool isArrival;
+  final String? _originStation;
+  final String? scheduledArrivalTimeFormatted;
+  final String? _estimatedArrivalTimeFormatted;
+
+  String? get originStation => _originStationExpando[this] ?? _originStation;
+  set originStation(String? value) => _originStationExpando[this] = value;
+
+  String? get estimatedArrivalTimeFormatted =>
+      _arrivalTimeExpando[this] ?? _estimatedArrivalTimeFormatted;
+  set estimatedArrivalTimeFormatted(String? value) =>
+      _arrivalTimeExpando[this] = value;
 
   const UnifiedDeparture({
     required this.tripId,
@@ -138,7 +153,12 @@ class UnifiedDeparture {
     required this.estimatedTimeFormatted,
     required this.isRealtime,
     this.platformCode,
-  });
+    this.isArrival = false,
+    String? originStation,
+    this.scheduledArrivalTimeFormatted,
+    String? estimatedArrivalTimeFormatted,
+  })  : _originStation = originStation,
+        _estimatedArrivalTimeFormatted = estimatedArrivalTimeFormatted;
 
   factory UnifiedDeparture.fromJson(Map<String, dynamic> json) {
     final opStr = (json['operator'] as String? ?? 'BKK').toUpperCase();
@@ -159,6 +179,26 @@ class UnifiedDeparture {
       estimatedTimeFormatted: json['estimated_time_formatted'] as String,
       isRealtime: json['is_realtime'] as bool? ?? false,
       platformCode: json['platform_code'] as String?,
+      isArrival: json['is_arrival'] as bool? ?? false,
+      originStation: json['origin_station'] as String?,
+      scheduledArrivalTimeFormatted:
+          json['scheduled_arrival_time_formatted'] as String?,
+      estimatedArrivalTimeFormatted:
+          json['estimated_arrival_time_formatted'] as String?,
+    );
+  }
+}
+
+class CoordinatePoint {
+  final double lat;
+  final double lon;
+
+  const CoordinatePoint({required this.lat, required this.lon});
+
+  factory CoordinatePoint.fromJson(Map<String, dynamic> json) {
+    return CoordinatePoint(
+      lat: (json['lat'] as num).toDouble(),
+      lon: (json['lon'] as num).toDouble(),
     );
   }
 }
@@ -293,10 +333,20 @@ class TransitRustBridge {
         'rust/target/release/transit_engine.dll',
         'rust/target/debug/transit_engine.dll',
       ];
+      String? newestPath;
+      DateTime? newestTime;
       for (final path in candidates) {
-        if (File(path).existsSync()) {
-          return DynamicLibrary.open(path);
+        final f = File(path);
+        if (f.existsSync()) {
+          final mtime = f.lastModifiedSync();
+          if (newestTime == null || mtime.isAfter(newestTime)) {
+            newestTime = mtime;
+            newestPath = path;
+          }
         }
+      }
+      if (newestPath != null) {
+        return DynamicLibrary.open(newestPath);
       }
       return DynamicLibrary.open('transit_engine.dll');
     } else if (Platform.isAndroid || Platform.isLinux) {
@@ -506,6 +556,32 @@ class TransitRustBridge {
     final decoded = jsonDecode(rawJson) as List<dynamic>;
     return decoded
         .map((e) => TripStopSchedule.fromJson(e as Map<String, dynamic>))
+        .toList();
+  }
+
+  Future<List<CoordinatePoint>> getTripGeometry({
+    required String tripId,
+  }) async {
+    final rawJson = await Isolate.run(() {
+      final lib = _openLibrary();
+      final fn = lib.lookupFunction<_GetTripScheduleNative, _GetTripScheduleDart>(
+        'transit_get_trip_geometry_json',
+      );
+      final freeFn = lib.lookupFunction<_FreeStringNative, _FreeStringDart>(
+        'transit_free_string',
+      );
+      final idPtr = tripId.toNativeUtf8();
+      final ptr = fn(idPtr);
+      try {
+        return ptr.toDartString();
+      } finally {
+        calloc.free(idPtr);
+        freeFn(ptr);
+      }
+    });
+    final decoded = jsonDecode(rawJson) as List<dynamic>;
+    return decoded
+        .map((e) => CoordinatePoint.fromJson(e as Map<String, dynamic>))
         .toList();
   }
 }

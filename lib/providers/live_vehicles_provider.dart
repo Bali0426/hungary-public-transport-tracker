@@ -45,6 +45,9 @@ final enabledTransitModesProvider = StateProvider<Set<String>>((ref) => {
       'boat',
     });
 
+/// Master switch: whether live vehicles layer is globally displayed on the map
+final showLiveVehiclesProvider = StateProvider<bool>((ref) => true);
+
 /// Whether stop groups / station hubs should be displayed on the map
 final showStopGroupsProvider = StateProvider<bool>((ref) => false);
 
