@@ -1,11 +1,16 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_map/flutter_map.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hungary_public_transport_tracker/bridge/bridge_generated.dart';
+import 'package:hungary_public_transport_tracker/providers/live_vehicles_provider.dart';
+import 'package:hungary_public_transport_tracker/utils/stop_group_geometry.dart';
 import 'package:hungary_public_transport_tracker/utils/transit_display_utils.dart';
 import 'package:hungary_public_transport_tracker/views/line_search_delegate.dart';
+import 'package:hungary_public_transport_tracker/views/map_screen.dart';
 import 'package:hungary_public_transport_tracker/views/widgets/map_control_buttons.dart';
 import 'package:hungary_public_transport_tracker/views/widgets/map_layers_menu.dart';
+import 'package:latlong2/latlong.dart';
 
 void main() {
   group('Official BudapestGO Transit Colors (Spec Chapter 3)', () {
@@ -210,6 +215,174 @@ void main() {
 
       expect(find.text('4-6'), findsNothing);
       expect(selectedResult, isNull);
+    });
+  });
+
+  group('StopGroupsLayer & PlatformsMapLayer Pre-baked & LOD', () {
+    test('StopGroupGeometry.cleanStationName caches and cleans station suffixes', () {
+      expect(
+        StopGroupGeometry.cleanStationName('Széll Kálmán tér M (Csaba utca)'),
+        equals('Széll Kálmán tér'),
+      );
+      expect(
+        StopGroupGeometry.cleanStationName('Batthyány tér M+H [A]'),
+        equals('Batthyány tér'),
+      );
+      expect(
+        identical(
+          StopGroupGeometry.cleanStationName('Széll Kálmán tér M (Csaba utca)'),
+          StopGroupGeometry.cleanStationName('Széll Kálmán tér M (Csaba utca)'),
+        ),
+        isTrue,
+      );
+    });
+
+    test('StopGroupGeometry.queryInBbox returns pre-baked stop groups with fixed centroids and polygons', () async {
+      final groups = await StopGroupGeometry.queryInBbox(
+        minLat: 47.490,
+        minLon: 19.015,
+        maxLat: 47.515,
+        maxLon: 19.065,
+        limit: 50,
+      );
+
+      expect(groups, isNotEmpty);
+      expect(groups.any((g) => g.polygonPoints.length >= 3), isTrue);
+
+      // Verify centroid stability regardless of bbox shift
+      final sample = groups.firstWhere((g) => g.polygonPoints.length >= 3);
+      final shiftedGroups = await StopGroupGeometry.queryInBbox(
+        minLat: sample.centroid.latitude - 0.002,
+        minLon: sample.centroid.longitude - 0.002,
+        maxLat: sample.centroid.latitude + 0.020,
+        maxLon: sample.centroid.longitude + 0.020,
+        limit: 50,
+      );
+      final sameGroup = shiftedGroups.firstWhere((g) => g.hubId == sample.hubId);
+      expect(sameGroup.centroid, equals(sample.centroid));
+      expect(identical(sameGroup.polygonPoints, sample.polygonPoints), isTrue);
+    });
+
+    testWidgets('StopGroupsLayer renders pre-baked polygons and labels without runtime clustering', (tester) async {
+      final mockGroup = PrebakedStopGroup.fromJson({
+        'id': 'HUB_SZELL',
+        'name': 'Széll Kálmán tér',
+        'lat': 47.507,
+        'lon': 19.025,
+        'op': 'BKK',
+        'mm': 1,
+        'count': 8,
+        'minLat': 47.506,
+        'maxLat': 47.508,
+        'minLon': 19.024,
+        'maxLon': 19.026,
+        'poly': [
+          [47.506, 19.024],
+          [47.508, 19.024],
+          [47.508, 19.026],
+          [47.506, 19.026],
+        ],
+      });
+
+      final container = ProviderContainer(
+        overrides: [
+          showStopGroupsProvider.overrideWith((ref) => true),
+          mapZoomProvider.overrideWith((ref) => 15.5),
+          viewportStopGroupsProvider.overrideWith((ref) async => [mockGroup]),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: container,
+          child: MaterialApp(
+            home: Scaffold(
+              body: FlutterMap(
+                options: const MapOptions(
+                  initialCenter: LatLng(47.507, 19.025),
+                  initialZoom: 15.5,
+                ),
+                children: [
+                  StopGroupsLayer(onStationTapped: (_) {}),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('Széll Kálmán tér'), findsOneWidget);
+      expect(find.byType(PolygonLayer), findsOneWidget);
+    });
+
+    testWidgets('PlatformsMapLayer hides below zoom 16.5 and renders at zoom >= 16.5', (tester) async {
+      const samplePlatforms = [
+        StopNode(
+          id: 'F001',
+          name: 'Deák Ferenc tér M',
+          lat: 47.4979,
+          lon: 19.0542,
+          operator: Operator.bkk,
+          isMultimodalHub: false,
+          vehicleType: 'tram',
+          servedRoutes: '47, 49',
+          direction: '180',
+        ),
+      ];
+
+      final container = ProviderContainer(
+        overrides: [
+          showPlatformsProvider.overrideWith((ref) => true),
+          mapZoomProvider.overrideWith((ref) => 15.5),
+          viewportPlatformsProvider.overrideWith((ref) async => samplePlatforms),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: container,
+          child: MaterialApp(
+            home: Scaffold(
+              body: FlutterMap(
+                options: const MapOptions(
+                  initialCenter: LatLng(47.4979, 19.0542),
+                  initialZoom: 15.5,
+                ),
+                children: [
+                  PlatformsMapLayer(onStationTapped: (_) {}),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // Hidden at zoom 15.5
+      expect(find.byType(BudapestGoPlatformPin), findsNothing);
+
+      // Visible at zoom 16.8
+      container.read(mapZoomProvider.notifier).state = 16.8;
+      await tester.pumpAndSettle();
+      expect(find.byType(BudapestGoPlatformPin), findsOneWidget);
+    });
+  });
+
+  group('MapScreen Engine Tests', () {
+    testWidgets('MapScreen mounts FlutterMap with OpenStreetMap and dark filter', (tester) async {
+      await tester.pumpWidget(
+        const ProviderScope(
+          child: MaterialApp(
+            home: MapScreen(),
+          ),
+        ),
+      );
+      await tester.pump();
+      expect(find.byType(MapScreen), findsOneWidget);
+      expect(find.byType(FlutterMap), findsOneWidget);
     });
   });
 }

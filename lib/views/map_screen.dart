@@ -43,13 +43,6 @@ class _MapScreenState extends ConsumerState<MapScreen> {
   String _lastDecodedGeoJson = '';
   List<dynamic> _cachedFeatures = const [];
 
-  List<Polygon> _cachedStopGroupPolygons = const [];
-  List<Marker> _cachedStopGroupLabelMarkers = const [];
-  List<Marker> _cachedPlatformMarkers = const [];
-  String _lastPolygonsKey = '';
-  String _lastLabelMarkersKey = '';
-  String _lastPlatformMarkersKey = '';
-
   @override
   void initState() {
     super.initState();
@@ -66,14 +59,9 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     super.dispose();
   }
 
-  /// BudapestGO 4-tier Level of Detail (LOD) classifier:
-  /// LOD 0 (zoom < 11.0): Macro / City view (Stops hidden)
-  /// LOD 1 (11.0 <= zoom < 13.0): Overview hub sketch view
-  /// LOD 2 (13.0 <= zoom < 15.0): Network / Service view with hub labels & bearing arrows
-  /// LOD 3 (zoom >= 15.0): Micro / Platform view with precise geometry
   int _getLodTier(double zoom) {
-    if (zoom >= 15.0) return 3;
-    if (zoom >= 13.0) return 2;
+    if (zoom >= 16.8) return 3;
+    if (zoom >= 14.5) return 2;
     if (zoom >= 11.0) return 1;
     return 0;
   }
@@ -84,13 +72,15 @@ class _MapScreenState extends ConsumerState<MapScreen> {
       setState(() {
         _currentZoom = newZoom;
       });
+      ref.read(mapZoomProvider.notifier).state = newZoom;
     }
 
     if (!hasGesture) return;
-    if (_currentZoom < 15.0) return; // LOD: stops and platforms completely hidden below zoom 15.0
+    if (_currentZoom < 14.5) return;
     if (!ref.read(showStopGroupsProvider) && !ref.read(showPlatformsProvider)) return;
+
     _cameraDebounce?.cancel();
-    _cameraDebounce = Timer(const Duration(milliseconds: 350), () {
+    _cameraDebounce = Timer(const Duration(milliseconds: 300), () {
       if (!mounted) return;
       final bounds = camera.visibleBounds;
       ref.read(viewportBboxProvider.notifier).state = ViewportBbox(
@@ -103,13 +93,126 @@ class _MapScreenState extends ConsumerState<MapScreen> {
   }
 
   void _updateViewportNow() {
-    final bounds = _mapController.camera.visibleBounds;
-    ref.read(viewportBboxProvider.notifier).state = ViewportBbox(
-      minLat: bounds.south,
-      minLon: bounds.west,
-      maxLat: bounds.north,
-      maxLon: bounds.east,
-    );
+    if (!mounted) return;
+    try {
+      final bounds = _mapController.camera.visibleBounds;
+      ref.read(viewportBboxProvider.notifier).state = ViewportBbox(
+        minLat: bounds.south,
+        minLon: bounds.west,
+        maxLat: bounds.north,
+        maxLon: bounds.east,
+      );
+    } catch (_) {
+      ref.read(viewportBboxProvider.notifier).state = const ViewportBbox(
+        minLat: 47.45,
+        minLon: 18.98,
+        maxLat: 47.55,
+        maxLon: 19.12,
+      );
+    }
+  }
+
+  void _moveCamera(LatLng center, double zoom) {
+    _mapController.move(center, zoom);
+    setState(() {
+      _currentZoom = zoom;
+    });
+    ref.read(mapZoomProvider.notifier).state = zoom;
+  }
+
+  void _onMapTapped(double tapLat, double tapLon) {
+    // 1. Check live vehicles near tap (within ~0.0025 degrees / ~180 meters)
+    if (ref.read(showLiveVehiclesProvider)) {
+      Map<String, dynamic>? closestVehicle;
+      double minVehicleDist = 0.0025;
+
+      for (final f in _cachedFeatures) {
+        final feat = f as Map<String, dynamic>;
+        final geom = feat['geometry'] as Map<String, dynamic>?;
+        final props = feat['properties'] as Map<String, dynamic>?;
+        if (geom == null || props == null) continue;
+        final coords = geom['coordinates'] as List<dynamic>?;
+        if (coords == null || coords.length < 2) continue;
+
+        final lon = (coords[0] as num).toDouble();
+        final lat = (coords[1] as num).toDouble();
+        final dist = (lat - tapLat).abs() + (lon - tapLon).abs();
+        if (dist <= minVehicleDist) {
+          minVehicleDist = dist;
+          props['lat'] = lat;
+          props['lon'] = lon;
+          closestVehicle = props;
+        }
+      }
+
+      if (closestVehicle != null) {
+        _onVehicleTapped(closestVehicle);
+        return;
+      }
+    }
+
+    // 2. Check platforms near tap (within ~0.0018 degrees)
+    if (ref.read(showPlatformsProvider) && _currentZoom >= 16.5) {
+      final platforms = ref.read(viewportPlatformsProvider).valueOrNull ?? const <StopNode>[];
+      StopNode? closestPlatform;
+      double minPlatformDist = 0.0018;
+
+      for (final s in platforms) {
+        final dist = (s.lat - tapLat).abs() + (s.lon - tapLon).abs();
+        if (dist <= minPlatformDist) {
+          minPlatformDist = dist;
+          closestPlatform = s;
+        }
+      }
+
+      if (closestPlatform != null) {
+        final platformNode = closestPlatform.isMultimodalHub
+            ? StopNode(
+                id: closestPlatform.id,
+                hubId: closestPlatform.hubId,
+                name: closestPlatform.name,
+                lat: closestPlatform.lat,
+                lon: closestPlatform.lon,
+                operator: closestPlatform.operator,
+                platformCode: closestPlatform.platformCode,
+                isMultimodalHub: false,
+                vehicleType: closestPlatform.vehicleType,
+                servedRoutes: closestPlatform.servedRoutes,
+                direction: closestPlatform.direction,
+              )
+            : closestPlatform;
+        _onStationTapped(platformNode);
+        return;
+      }
+    }
+
+    // 3. Check stop groups near tap (within ~0.0028 degrees)
+    if (ref.read(showStopGroupsProvider) && _currentZoom >= 14.5) {
+      final stopGroups = ref.read(viewportStopGroupsProvider).valueOrNull ?? const <PrebakedStopGroup>[];
+      PrebakedStopGroup? closestGroup;
+      double minGroupDist = 0.0028;
+
+      for (final g in stopGroups) {
+        final dist = (g.centroid.latitude - tapLat).abs() + (g.centroid.longitude - tapLon).abs();
+        if (dist <= minGroupDist) {
+          minGroupDist = dist;
+          closestGroup = g;
+        }
+      }
+
+      if (closestGroup != null) {
+        _onStationTapped(closestGroup.groupNode);
+        return;
+      }
+    }
+
+    // Deselect if tapped empty space
+    if (_selectedVehicle != null || _selectedStation != null) {
+      setState(() {
+        _selectedVehicle = null;
+        _selectedStation = null;
+      });
+    }
   }
 
   void _onStationTapped(StopNode station) {
@@ -119,10 +222,8 @@ class _MapScreenState extends ConsumerState<MapScreen> {
       _selectedVehicle = null;
       _currentZoom = targetZoom;
     });
-    _mapController.move(
-      LatLng(station.lat, station.lon),
-      targetZoom,
-    );
+    ref.read(mapZoomProvider.notifier).state = targetZoom;
+    _moveCamera(LatLng(station.lat, station.lon), targetZoom);
   }
 
   void _onVehicleTapped(Map<String, dynamic> props) {
@@ -179,10 +280,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     final lat = (props['lat'] as num?)?.toDouble() ?? 0.0;
     final lon = (props['lon'] as num?)?.toDouble() ?? 0.0;
     if (lat != 0.0 && lon != 0.0) {
-      _mapController.move(LatLng(lat, lon), 15.0);
-      setState(() {
-        _currentZoom = 15.0;
-      });
+      _moveCamera(LatLng(lat, lon), 15.0);
     }
     _onVehicleTapped(props);
   }
@@ -192,6 +290,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     Set<String> enabledModes,
     double zoom,
     bool isDarkMode,
+    LatLngBounds? visibleBounds,
   ) {
     if (geoJsonStr.isEmpty) return const [];
     try {
@@ -201,11 +300,20 @@ class _MapScreenState extends ConsumerState<MapScreen> {
         _lastDecodedGeoJson = geoJsonStr;
       }
 
-      // Vehicles switch from detailed pills to circle dots below zoom 15.0
       final isDetailed = zoom >= 15.0;
-
       final markers = <Marker>[];
       final seenHevKeys = <String>{};
+
+      // Viewport culling bounding box (+15% margin around camera view)
+      double minLat = -90.0, maxLat = 90.0, minLon = -180.0, maxLon = 180.0;
+      if (visibleBounds != null) {
+        final latMargin = (visibleBounds.north - visibleBounds.south).abs() * 0.15;
+        final lonMargin = (visibleBounds.east - visibleBounds.west).abs() * 0.15;
+        minLat = visibleBounds.south - latMargin;
+        maxLat = visibleBounds.north + latMargin;
+        minLon = visibleBounds.west - lonMargin;
+        maxLon = visibleBounds.east + lonMargin;
+      }
 
       for (final f in _cachedFeatures) {
         final feat = f as Map<String, dynamic>;
@@ -218,6 +326,12 @@ class _MapScreenState extends ConsumerState<MapScreen> {
 
         final lon = (coords[0] as num).toDouble();
         final lat = (coords[1] as num).toDouble();
+
+        // 1. Viewport Culling: discard items outside camera bounds immediately
+        if (lat < minLat || lat > maxLat || lon < minLon || lon > maxLon) {
+          continue;
+        }
+
         props['lat'] = lat;
         props['lon'] = lon;
         final rawLineName = props['line_name'] as String? ?? '';
@@ -226,7 +340,6 @@ class _MapScreenState extends ConsumerState<MapScreen> {
         final op = props['operator'] as String? ?? '';
         final tripShort = props['trip_short_name'] as String? ?? '';
 
-        // Normalize HÉVs (H5-H9): even if MÁV feed mislabeled them as 'train'
         final isHev = vType == 'suburban_rail' ||
             RegExp(r'^H[5-9]\b', caseSensitive: false).hasMatch(rawLineName) ||
             RegExp(r'^H[5-9]\b', caseSensitive: false).hasMatch(tripShort) ||
@@ -243,7 +356,6 @@ class _MapScreenState extends ConsumerState<MapScreen> {
             props['line_name'] = lineName;
           }
 
-          // Deduplicate HÉVs that appear in both BKK and MÁV feeds
           final dupKey = '${lineName.toUpperCase()}_${(lat * 150).round()}_${(lon * 150).round()}';
           if (seenHevKeys.contains(dupKey)) {
             continue;
@@ -261,12 +373,6 @@ class _MapScreenState extends ConsumerState<MapScreen> {
         final isTramOrBoat = vType == 'tram' || vType == 'boat';
         final isLargeVehicle = isTrain || isSuburban || isMetro;
 
-        // Vehicle visibility tiers by zoom (LOD):
-        // zoom < 8.0: All vehicles hidden at national overview
-        // 8.0 <= zoom < 10.0: Only heavy rail trains
-        // 10.0 <= zoom < 12.0: Large vehicles (train, suburban_rail/HÉV, metro)
-        // 12.0 <= zoom < 13.5: Large vehicles + trams & boats (buses & small vehicles disappear earlier)
-        // zoom >= 13.5: All enabled modes visible (buses, trolleys, etc.)
         if (zoom < 8.0) {
           continue;
         } else if (zoom < 10.0) {
@@ -274,7 +380,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
         } else if (zoom < 12.0) {
           if (!isLargeVehicle) continue;
         } else if (zoom < 13.5) {
-          if (!isLargeVehicle && !isTramOrBoat) continue; // buses and small vehicles disappear earlier than trams
+          if (!isLargeVehicle && !isTramOrBoat) continue;
         }
 
         final bool showDelayIndicator = isTrain || isSuburban;
@@ -341,7 +447,6 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                             ],
                           ),
                         ),
-                        // Only trains and HÉVs display the delay dot below the capsule
                         if (showDelayIndicator) ...[
                           const SizedBox(height: 2),
                           Container(
@@ -350,13 +455,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                             decoration: BoxDecoration(
                               color: dotColor,
                               shape: BoxShape.circle,
-                              border: Border.all(color: Colors.black87, width: 1),
-                              boxShadow: [
-                                BoxShadow(
-                                  color: dotColor.withValues(alpha: 0.9),
-                                  blurRadius: 4,
-                                ),
-                              ],
+                              border: Border.all(color: Colors.black87, width: 1.0),
                             ),
                           ),
                         ],
@@ -368,41 +467,18 @@ class _MapScreenState extends ConsumerState<MapScreen> {
             ),
           );
         } else {
-          final double dotDiameter = (zoom < 8.5) ? 8.0 : ((zoom < 11.0) ? 10.0 : 11.5);
-          final Border circleBorder = showDelayIndicator
-              ? Border.all(color: dotColor, width: 2.0)
-              : Border.all(
-                  color: isDarkMode ? Colors.white : const Color(0xFF1E293B),
-                  width: 1.5,
-                );
-
           markers.add(
             Marker(
               point: LatLng(lat, lon),
-              width: dotDiameter + 8,
-              height: dotDiameter + 8,
-              alignment: Alignment.center,
+              width: 12,
+              height: 12,
               child: GestureDetector(
                 onTap: () => _onVehicleTapped(props),
-                child: Tooltip(
-                  message: lineName.isNotEmpty ? '$lineName • ${vType.toUpperCase()}' : vType.toUpperCase(),
-                  child: Center(
-                    child: Container(
-                      width: dotDiameter,
-                      height: dotDiameter,
-                      decoration: BoxDecoration(
-                        color: pillBgColor,
-                        shape: BoxShape.circle,
-                        border: circleBorder,
-                        boxShadow: [
-                          BoxShadow(
-                            color: Colors.black.withValues(alpha: 0.5),
-                            blurRadius: 3,
-                            offset: const Offset(0, 1),
-                          ),
-                        ],
-                      ),
-                    ),
+                child: Container(
+                  decoration: BoxDecoration(
+                    color: pillBgColor,
+                    shape: BoxShape.circle,
+                    border: Border.all(color: Colors.white, width: 1.5),
                   ),
                 ),
               ),
@@ -416,288 +492,26 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     }
   }
 
-  /// Single station name label per hub inside the polygon with clickable capsule background.
-  /// When zoom < 14.0, only railway stations are shown.
-  List<Marker> _buildStopGroupLabelMarkers(
-    List<StopNode> stopGroups,
-    List<StopNode> platforms,
-    bool isDarkMode,
-    double zoom,
-  ) {
-    if (zoom < 15.0) return const [];
-
-    final filteredPlatforms = platforms;
-    final filteredStopGroups = stopGroups;
-
-    final clusters = StopGroupGeometry.getHubClusters(filteredPlatforms);
-    final candidates = <_StationLabelCandidate>[];
-    final processedNames = <String>{};
-
-    for (final cluster in clusters) {
-      if (cluster.stops.isEmpty) continue;
-      final cName = cluster.name;
-      processedNames.add(cName.toLowerCase());
-      final score = (cluster.isMultimodal ? 100 : 0) + (cluster.stops.length * 10);
-      candidates.add(_StationLabelCandidate(
-        name: cName,
-        centroid: cluster.centroid,
-        stop: cluster.stops.first,
-        score: score,
-      ));
-    }
-
-    // Also include single stop groups if not already covered by clustered platforms
-    for (final sg in filteredStopGroups) {
-      final cName = StopGroupGeometry.cleanStationName(sg.name);
-      if (processedNames.contains(cName.toLowerCase())) continue;
-      processedNames.add(cName.toLowerCase());
-      final score = (sg.isMultimodalHub ? 80 : 0) + 5;
-      candidates.add(_StationLabelCandidate(
-        name: cName,
-        centroid: LatLng(sg.lat, sg.lon),
-        stop: sg,
-        score: score,
-      ));
-    }
-
-    // Priority sort: most important hubs rendered first
-    candidates.sort((a, b) => b.score.compareTo(a.score));
-
-    // Collision avoidance / de-cluttering based on screen density
-    final double minDistanceMeters = (zoom >= 15.0) ? 90.0 : (zoom >= 14.0 ? 240.0 : 420.0);
-    final accepted = <_StationLabelCandidate>[];
-
-    for (final cand in candidates) {
-      final collision = accepted.any((acc) =>
-          StopGroupGeometry.distanceMeters(
-            acc.centroid.latitude,
-            acc.centroid.longitude,
-            cand.centroid.latitude,
-            cand.centroid.longitude,
-          ) < minDistanceMeters);
-      if (!collision) {
-        accepted.add(cand);
-      }
-    }
-
-    final textColor = isDarkMode ? Colors.white : const Color(0xFF1E293B);
-
-    final markers = <Marker>[];
-    for (final cand in accepted) {
-      // Hub name click: transmits full group indicator to StationDetailCard
-      final groupNode = StopNode(
-        id: 'GROUP:${cand.name}:${cand.centroid.latitude}:${cand.centroid.longitude}',
-        hubId: cand.stop.hubId,
-        name: cand.name,
-        lat: cand.centroid.latitude,
-        lon: cand.centroid.longitude,
-        operator: cand.stop.operator,
-        platformCode: null,
-        isMultimodalHub: true,
-        vehicleType: cand.stop.vehicleType,
-        servedRoutes: cand.stop.servedRoutes,
-        direction: null,
-      );
-
-      markers.add(
-        Marker(
-          point: cand.centroid,
-          width: 170,
-          height: 32,
-          alignment: Alignment.center,
-          child: GestureDetector(
-            onTap: () => _onStationTapped(groupNode),
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
-              color: Colors.transparent,
-              child: Text(
-                cand.name,
-                textAlign: TextAlign.center,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                  fontSize: 11.5,
-                  fontWeight: FontWeight.w700,
-                  letterSpacing: -0.2,
-                  color: textColor,
-                  shadows: [
-                    Shadow(
-                      color: isDarkMode ? Colors.black : Colors.white,
-                      blurRadius: 3,
-                    ),
-                    Shadow(
-                      color: isDarkMode ? Colors.black : Colors.white,
-                      blurRadius: 3,
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ),
-        ),
-      );
-    }
-    return markers;
-  }
-
-  /// Authentic BudapestGO platform colors: Tram (#FFD800), Bus (#009EE3), HÉV (#007A33), Trolley (#E41F18), Metro (#6D6E71), Boat (#E52082)
-  Color _getBudapestGoModeColor(StopNode stop) {
-    if (stop.operator == Operator.mav) return const Color(0xFF003B7A);
-    return getModeBadgeColor(stop.vehicleType ?? 'bus');
-  }
-
-  /// Resolves distinct branch/mode colors served at a specific platform pin (Chapter 1 & 3).
-  List<Color> _getPlatformColors(StopNode stop) {
-    if (stop.operator == Operator.mav) {
-      return const [Color(0xFF003B7A)];
-    }
-    final routesStr = stop.servedRoutes;
-    if (routesStr == null || routesStr.trim().isEmpty) {
-      return [_getBudapestGoModeColor(stop)];
-    }
-
-    final tokens = routesStr
-        .split(RegExp(r'[,;\s/]+'))
-        .map((e) => e.trim())
-        .where((e) => e.isNotEmpty);
-
-    final colors = <Color>[];
-    for (final t in tokens) {
-      final c = getLineOrRouteColor(t, mode: stop.vehicleType);
-      if (!colors.contains(c)) {
-        colors.add(c);
-      }
-    }
-
-    if (colors.isEmpty) {
-      colors.add(_getBudapestGoModeColor(stop));
-    }
-    return colors.take(4).toList();
-  }
-
-  /// Builds platform circular markers styled according to the 4 BudapestGO LOD tiers.
-  /// When zoom < 14.0, only railway stations are shown.
-  List<Marker> _buildPlatformMarkers(
-    List<StopNode> platforms,
-    Set<String> enabledModes,
-    double zoom,
-    bool isDarkMode,
-  ) {
-    if (zoom < 16.5) return const []; // Platforms completely hidden until zoom 16.5
-
-    final effectivePlatforms = platforms;
-    if (effectivePlatforms.isEmpty) return const [];
-
-    final markers = <Marker>[];
-    final bool isLod3 = zoom >= 17.5;
-
-    // Platform markers at high zoom
-    final double diameter = isLod3 ? 15.0 : 13.0;
-    final double strokeWidth = isLod3 ? 2.8 : 1.5;
-    const bool showArrow = true;
-    final double arrowSize = isLod3 ? 5.5 : 4.5;
-    final double markerBoxSize = isLod3 ? 34.0 : 28.0;
-
-    for (final s in effectivePlatforms) {
-      final mode = s.vehicleType ?? 'bus';
-      if (s.vehicleType != null && !enabledModes.contains(mode)) {
-        continue;
-      }
-
-      final platformColors = _getPlatformColors(s);
-
-      final hasPlatform = s.platformCode != null && s.platformCode!.trim().isNotEmpty;
-      final platformText = hasPlatform ? s.platformCode!.trim() : '';
-
-      final tooltipMsg = StringBuffer(s.name);
-      if (hasPlatform) {
-        tooltipMsg.write('\nPeron / Vágány: $platformText');
-      }
-      if (s.servedRoutes != null && s.servedRoutes!.isNotEmpty) {
-        tooltipMsg.write('\nJáratok: ${s.servedRoutes}');
-      }
-      if (s.direction != null && s.direction!.isNotEmpty) {
-        tooltipMsg.write('\nIrány: ${s.direction}');
-      }
-
-      final double angle;
-      final parsedDir = double.tryParse(s.direction ?? '');
-      if (parsedDir != null) {
-        angle = parsedDir * math.pi / 180.0;
-      } else {
-        angle = ((s.direction ?? s.id).hashCode % 360) * math.pi / 180.0;
-      }
-
-      // Individual platform tap: preserves s.id and forces isMultimodalHub: false
-      final platformNode = s.isMultimodalHub
-          ? StopNode(
-              id: s.id,
-              hubId: s.hubId,
-              name: s.name,
-              lat: s.lat,
-              lon: s.lon,
-              operator: s.operator,
-              platformCode: s.platformCode,
-              isMultimodalHub: false,
-              vehicleType: s.vehicleType,
-              servedRoutes: s.servedRoutes,
-              direction: s.direction,
-            )
-          : s;
-
-      markers.add(
-        Marker(
-          point: LatLng(s.lat, s.lon),
-          width: markerBoxSize,
-          height: markerBoxSize,
-          alignment: Alignment.center,
-          child: Tooltip(
-            message: tooltipMsg.toString(),
-            child: GestureDetector(
-              onTap: () => _onStationTapped(platformNode),
-              child: BudapestGoPlatformPin(
-                colors: platformColors,
-                angle: angle,
-                diameter: diameter,
-                strokeWidth: strokeWidth,
-                strokeColor: const Color(0xFF212121),
-                showArrow: showArrow,
-                arrowSize: arrowSize,
-                isLod3: isLod3,
-                isDarkMode: isDarkMode,
-              ),
-            ),
-          ),
-        ),
-      );
-    }
-    return markers;
-  }
-
   @override
   Widget build(BuildContext context) {
     final liveVehiclesAsync = ref.watch(liveVehiclesGeoJsonProvider);
-    final showLiveVehicles = ref.watch(showLiveVehiclesProvider);
-    final stopGroupsAsync = ref.watch(viewportStopGroupsProvider);
-    final platformsAsync = ref.watch(viewportPlatformsProvider);
-    final enabledModes = ref.watch(enabledTransitModesProvider);
     final isDarkMode = ref.watch(mapDarkModeProvider);
-    final showStopGroups = ref.watch(showStopGroupsProvider);
-    final showPlatforms = ref.watch(showPlatformsProvider);
+    final enabledModes = ref.watch(enabledTransitModesProvider);
+    final showLiveVehicles = ref.watch(showLiveVehiclesProvider);
     final showOpenRailwayMap = ref.watch(showOpenRailwayMapProvider);
     final railwayStyle = ref.watch(openRailwayMapStyleProvider);
-    final showRailwayLines = ref.watch(showRailwayLinesProvider);
+
     final showMetroLines = ref.watch(showMetroLinesProvider);
     final showHevLines = ref.watch(showHevLinesProvider);
     final showTramLines = ref.watch(showTramLinesProvider);
+    final showRailwayLines = ref.watch(showRailwayLinesProvider);
 
-    // Dynamic vehicle route polyline when a vehicle is selected
-    final selectedTripId = _selectedVehicle?['trip_id']?.toString();
-    final selectedRouteCoords = (selectedTripId != null && selectedTripId.isNotEmpty)
-        ? ref.watch(vehicleRoutePolylineProvider(selectedTripId)).valueOrNull ?? const <LatLng>[]
-        : const <LatLng>[];
-
+    // Selected vehicle route geometry polyline
     Polyline? selectedVehicleRoutePolyline;
+    final selectedTripId = _selectedVehicle?['trip_id']?.toString() ??
+        _selectedVehicle?['id']?.toString() ??
+        '';
+    final selectedRouteCoords = ref.watch(vehicleRoutePolylineProvider(selectedTripId)).valueOrNull ?? const [];
     if (showLiveVehicles && _selectedVehicle != null && selectedRouteCoords.length >= 2) {
       final vType = _selectedVehicle?['vehicle_type']?.toString().toLowerCase() ?? 'bus';
       final modeColor = getModeBadgeColor(vType);
@@ -710,7 +524,6 @@ class _MapScreenState extends ConsumerState<MapScreen> {
       );
     }
 
-    // Network infrastructure lines (Metro, HÉV, Tram, Railway)
     final List<Polyline> networkPolylines = [
       if (showMetroLines) ...ref.watch(metroPolylinesProvider),
       if (showHevLines) ...ref.watch(hevPolylinesProvider),
@@ -719,19 +532,16 @@ class _MapScreenState extends ConsumerState<MapScreen> {
     ];
 
     final geojson = liveVehiclesAsync.valueOrNull ?? '';
+    LatLngBounds? visibleBounds;
+    try {
+      visibleBounds = _mapController.camera.visibleBounds;
+    } catch (_) {}
+
     final vehicleMarkers = (showLiveVehicles && geojson.isNotEmpty)
-        ? _buildVehicleMarkers(geojson, enabledModes, _currentZoom, isDarkMode)
+        ? _buildVehicleMarkers(geojson, enabledModes, _currentZoom, isDarkMode, visibleBounds)
         : const <Marker>[];
 
-    // Calculate vehicles visible in current camera viewport
-    int renderedCount = 0;
-    try {
-      final bounds = _mapController.camera.visibleBounds;
-      renderedCount = vehicleMarkers.where((m) => bounds.contains(m.point)).length;
-    } catch (_) {
-      renderedCount = vehicleMarkers.length;
-    }
-
+    final renderedCount = vehicleMarkers.length;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) {
         final current = ref.read(renderedVehiclesCountProvider);
@@ -741,69 +551,26 @@ class _MapScreenState extends ConsumerState<MapScreen> {
       }
     });
 
-    final stopGroupsList = stopGroupsAsync.valueOrNull ?? const <StopNode>[];
-    final platformsList = platformsAsync.valueOrNull ?? const <StopNode>[];
-
-    // Prebaked / Memoized LOD hulls for stop groups: shown when zoom >= 15.0 (matching vehicle name tags)
-    final polyKey = '${showStopGroups}_${isDarkMode}_${_currentZoom >= 15.0}_${platformsList.length}';
-    final stopGroupPolygons = (showStopGroups && _currentZoom >= 15.0)
-        ? (_lastPolygonsKey == polyKey
-            ? _cachedStopGroupPolygons
-            : (_cachedStopGroupPolygons = StopGroupGeometry.buildHubPolygons(
-                platformsList,
-                isDarkMode: isDarkMode,
-                zoom: _currentZoom,
-              )))
-        : const <Polygon>[];
-    _lastPolygonsKey = polyKey;
-
-    // Station labels: shown when zoom >= 15.0 (matching vehicle name tags)
-    final labelKey = '${showStopGroups}_${isDarkMode}_${_currentZoom >= 15.0}_${stopGroupsList.length}_${platformsList.length}';
-    final stopGroupLabelMarkers = (showStopGroups && _currentZoom >= 15.0)
-        ? (_lastLabelMarkersKey == labelKey
-            ? _cachedStopGroupLabelMarkers
-            : (_cachedStopGroupLabelMarkers = _buildStopGroupLabelMarkers(
-                stopGroupsList,
-                platformsList,
-                isDarkMode,
-                _currentZoom,
-              )))
-        : const <Marker>[];
-    _lastLabelMarkersKey = labelKey;
-
-    // Platform markers: shown when zoom >= 16.5
-    final platKey = '${showPlatforms}_${isDarkMode}_${_currentZoom >= 16.5}_${platformsList.length}_${enabledModes.length}';
-    final platformMarkers = (showPlatforms && _currentZoom >= 16.5)
-        ? (_lastPlatformMarkersKey == platKey
-            ? _cachedPlatformMarkers
-            : (_cachedPlatformMarkers = _buildPlatformMarkers(
-                platformsList,
-                enabledModes,
-                _currentZoom,
-                isDarkMode,
-              )))
-        : const <Marker>[];
-    _lastPlatformMarkersKey = platKey;
-
     final theme = Theme.of(context);
 
     return Scaffold(
       backgroundColor: theme.scaffoldBackgroundColor,
       body: Stack(
         children: [
-          // Base Interactive Map
+          // 1. Base Interactive Map (OpenStreetMap with custom dark mode matrix filter)
           FlutterMap(
             mapController: _mapController,
             options: MapOptions(
               initialCenter: _budapestCenter,
               initialZoom: 12.5,
               onPositionChanged: _onPositionChanged,
+              onTap: (tapPosition, point) => _onMapTapped(point.latitude, point.longitude),
               interactionOptions: const InteractionOptions(
                 flags: InteractiveFlag.all,
               ),
             ),
             children: [
-              // OpenStreetMap tile layer with dark mode matrix filter
+              // OpenStreetMap Tile Layer with dark mode matrix filter
               ColorFiltered(
                 colorFilter: isDarkMode
                     ? const ColorFilter.matrix(<double>[
@@ -822,7 +589,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                 ),
               ),
 
-              // OpenRailwayMap railway infrastructure overlay tile layer
+              // OpenRailwayMap railway infrastructure overlay
               if (showOpenRailwayMap)
                 ColorFiltered(
                   colorFilter: isDarkMode
@@ -837,42 +604,29 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                           BlendMode.dst,
                         ),
                   child: TileLayer(
-                    urlTemplate: railwayStyle.tileUrlTemplate,
+                    urlTemplate: railwayStyle.tileUrl,
                     subdomains: const ['a', 'b', 'c'],
                     userAgentPackageName: 'hungary.public.transport.tracker',
-                    tileBuilder: (context, tileWidget, tile) {
-                      return DecoratedBox(
-                        decoration: const BoxDecoration(
-                          color: Colors.transparent,
-                        ),
-                        child: tileWidget,
-                      );
-                    },
                   ),
                 ),
 
-              // 1. Shaded Enclosure Boundary Polygons for Stop Groups ("station_hull", BudapestGO)
-              if (showStopGroups && stopGroupPolygons.isNotEmpty)
-                PolygonLayer(polygons: stopGroupPolygons),
-
-              // Network infrastructure transit lines (Metro, HÉV, Tram, Railway)
+              // Infrastructure transit polylines
               if (networkPolylines.isNotEmpty)
                 PolylineLayer(polylines: networkPolylines),
 
-              // Active selected vehicle route polyline
+              // Selected vehicle route polyline
               if (selectedVehicleRoutePolyline != null)
                 PolylineLayer(polylines: [selectedVehicleRoutePolyline]),
 
-              // 2. Stop Group Station Name Labels (BudapestGO single halo label per hub)
-              if (showStopGroups && stopGroupLabelMarkers.isNotEmpty)
-                MarkerLayer(markers: stopGroupLabelMarkers),
+              // Pre-baked Stop Groups & Station Labels
+              StopGroupsLayer(onStationTapped: _onStationTapped),
 
-              // 3. Individual Directional Platform Stops (BudapestGO circle + black bearing arrow)
-              if (showPlatforms && platformMarkers.isNotEmpty)
-                MarkerLayer(markers: platformMarkers),
+              // Directional Platforms Layer (LOD >= 16.8)
+              PlatformsMapLayer(onStationTapped: _onStationTapped),
 
-              // 4. Live Vehicle Positions Layer (Top layer)
-              MarkerLayer(markers: vehicleMarkers),
+              // Live Vehicle Markers (Viewport Culled)
+              if (showLiveVehicles && vehicleMarkers.isNotEmpty)
+                MarkerLayer(markers: vehicleMarkers),
             ],
           ),
 
@@ -927,10 +681,7 @@ class _MapScreenState extends ConsumerState<MapScreen> {
                   backgroundColor: theme.colorScheme.surfaceContainerHigh,
                   foregroundColor: theme.colorScheme.onSurfaceVariant,
                   onPressed: () {
-                    _mapController.move(_budapestCenter, 15.0);
-                    setState(() {
-                      _currentZoom = 15.0;
-                    });
+                    _moveCamera(_budapestCenter, 15.0);
                     _updateViewportNow();
                   },
                   child: const Icon(Icons.my_location, size: 20),
@@ -1042,6 +793,310 @@ class _MapScreenState extends ConsumerState<MapScreen> {
   }
 }
 
+/// Isolated ConsumerWidget for Stop Group boundary polygons and station name labels.
+/// Renders pre-baked convex hull polygons and fixed station centroids without runtime clustering.
+typedef StopGroupsMapLayer = StopGroupsLayer;
+
+class StopGroupsLayer extends ConsumerStatefulWidget {
+  final ValueChanged<StopNode> onStationTapped;
+
+  const StopGroupsLayer({
+    super.key,
+    required this.onStationTapped,
+  });
+
+  @override
+  ConsumerState<StopGroupsLayer> createState() => _StopGroupsLayerState();
+}
+
+class _StopGroupsLayerState extends ConsumerState<StopGroupsLayer> {
+  List<PrebakedStopGroup>? _lastStopGroups;
+  bool? _lastDark;
+  List<Polygon> _cachedPolygons = const [];
+  List<Marker> _cachedLabelMarkers = const [];
+
+  static const _darkShadows = [
+    Shadow(color: Colors.black, blurRadius: 3),
+    Shadow(color: Colors.black, blurRadius: 3),
+  ];
+  static const _lightShadows = [
+    Shadow(color: Colors.white, blurRadius: 3),
+    Shadow(color: Colors.white, blurRadius: 3),
+  ];
+
+  List<Marker> _buildLabelMarkers(List<PrebakedStopGroup> stopGroups, bool isDarkMode) {
+    if (stopGroups.isEmpty) return const [];
+
+    final candidates = <_StationLabelCandidate>[];
+    final processedNames = <String>{};
+
+    for (final sg in stopGroups) {
+      final lower = sg.name.toLowerCase();
+      if (processedNames.contains(lower)) continue;
+      processedNames.add(lower);
+      final score = (sg.isMultimodal ? 100 : 0) +
+          (sg.operator == Operator.mav ? 50 : 0) +
+          (sg.stopCount * 10);
+      candidates.add(_StationLabelCandidate(
+        name: sg.name,
+        centroid: sg.centroid,
+        stop: sg.groupNode,
+        score: score,
+      ));
+    }
+
+    candidates.sort((a, b) => b.score.compareTo(a.score));
+
+    const double minDistanceMeters = 90.0;
+    final accepted = <_StationLabelCandidate>[];
+
+    for (final cand in candidates) {
+      final collision = accepted.any((acc) =>
+          StopGroupGeometry.distanceMeters(
+            acc.centroid.latitude,
+            acc.centroid.longitude,
+            cand.centroid.latitude,
+            cand.centroid.longitude,
+          ) < minDistanceMeters);
+      if (!collision) {
+        accepted.add(cand);
+      }
+    }
+
+    final labelStyle = TextStyle(
+      fontSize: 11.5,
+      fontWeight: FontWeight.w700,
+      letterSpacing: -0.2,
+      color: isDarkMode ? Colors.white : const Color(0xFF1E293B),
+      shadows: isDarkMode ? _darkShadows : _lightShadows,
+    );
+
+    final markers = <Marker>[];
+    for (final cand in accepted) {
+      markers.add(
+        Marker(
+          point: cand.centroid,
+          width: 170,
+          height: 32,
+          alignment: Alignment.center,
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: () => widget.onStationTapped(cand.stop),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+              child: Text(
+                cand.name,
+                textAlign: TextAlign.center,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: labelStyle,
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+    return markers;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final showStopGroups = ref.watch(showStopGroupsProvider);
+    final zoomOk = ref.watch(mapZoomProvider.select((z) => z >= 15.0));
+    if (!showStopGroups || !zoomOk) return const SizedBox.shrink();
+
+    final isDarkMode = ref.watch(mapDarkModeProvider);
+    final stopGroups = ref.watch(viewportStopGroupsProvider).valueOrNull ?? const <PrebakedStopGroup>[];
+
+    if (!identical(stopGroups, _lastStopGroups) || _lastDark != isDarkMode) {
+      _cachedPolygons = StopGroupGeometry.buildPrebakedPolygons(
+        stopGroups,
+        isDarkMode: isDarkMode,
+      );
+      _cachedLabelMarkers = _buildLabelMarkers(stopGroups, isDarkMode);
+      _lastStopGroups = stopGroups;
+      _lastDark = isDarkMode;
+    }
+
+    if (_cachedPolygons.isEmpty && _cachedLabelMarkers.isEmpty) {
+      return const SizedBox.shrink();
+    }
+
+    return Stack(
+      children: [
+        if (_cachedPolygons.isNotEmpty) PolygonLayer(polygons: _cachedPolygons),
+        if (_cachedLabelMarkers.isNotEmpty) MarkerLayer(markers: _cachedLabelMarkers),
+      ],
+    );
+  }
+}
+
+/// Isolated ConsumerWidget for individual directional platform pins.
+/// Only loads and renders at high zoom (zoom >= 16.8) and never rebuilds on vehicle stream ticks.
+class PlatformsMapLayer extends ConsumerStatefulWidget {
+  final ValueChanged<StopNode>? onStationTapped;
+
+  const PlatformsMapLayer({
+    super.key,
+    this.onStationTapped,
+  });
+
+  @override
+  ConsumerState<PlatformsMapLayer> createState() => _PlatformsMapLayerState();
+}
+
+class _PlatformsMapLayerState extends ConsumerState<PlatformsMapLayer> {
+  static final RegExp _routeSplitRegex = RegExp(r'[,;\s/]+');
+  static final Map<String, List<Color>> _platformColorsCache = {};
+
+  List<StopNode>? _lastPlatforms;
+  Set<String>? _lastEnabledModes;
+  bool? _lastIsLod3;
+  bool? _lastDark;
+  List<Marker> _cachedMarkers = const [];
+
+  static Color _getBudapestGoModeColor(StopNode stop) {
+    if (stop.operator == Operator.mav) return const Color(0xFF003B7A);
+    return getModeBadgeColor(stop.vehicleType ?? 'bus');
+  }
+
+  static List<Color> _getPlatformColors(StopNode stop) {
+    if (stop.operator == Operator.mav) {
+      return const [Color(0xFF003B7A)];
+    }
+    final routesStr = stop.servedRoutes;
+    final mode = stop.vehicleType ?? 'bus';
+    final cacheKey = '$mode|${routesStr ?? ''}';
+
+    return _platformColorsCache.putIfAbsent(cacheKey, () {
+      if (routesStr == null || routesStr.trim().isEmpty) {
+        return [_getBudapestGoModeColor(stop)];
+      }
+
+      final tokens = routesStr
+          .split(_routeSplitRegex)
+          .map((e) => e.trim())
+          .where((e) => e.isNotEmpty);
+
+      final colors = <Color>[];
+      for (final t in tokens) {
+        final c = getLineOrRouteColor(t, mode: stop.vehicleType);
+        if (!colors.contains(c)) {
+          colors.add(c);
+        }
+      }
+
+      if (colors.isEmpty) {
+        colors.add(_getBudapestGoModeColor(stop));
+      }
+      return List<Color>.unmodifiable(colors.take(4));
+    });
+  }
+
+  List<Marker> _buildMarkers(
+    List<StopNode> platforms,
+    Set<String> enabledModes,
+    bool isLod3,
+    bool isDarkMode,
+  ) {
+    if (platforms.isEmpty) return const [];
+
+    final markers = <Marker>[];
+    final double diameter = isLod3 ? 15.0 : 13.0;
+    final double strokeWidth = isLod3 ? 2.8 : 1.5;
+    final double arrowSize = isLod3 ? 5.5 : 4.5;
+    final double markerBoxSize = isLod3 ? 34.0 : 28.0;
+
+    for (final s in platforms) {
+      final mode = s.vehicleType ?? 'bus';
+      if (s.vehicleType != null && !enabledModes.contains(mode)) {
+        continue;
+      }
+
+      final platformColors = _getPlatformColors(s);
+      final double angle;
+      final parsedDir = double.tryParse(s.direction ?? '');
+      if (parsedDir != null) {
+        angle = parsedDir * math.pi / 180.0;
+      } else {
+        angle = ((s.direction ?? s.id).hashCode % 360) * math.pi / 180.0;
+      }
+
+      final platformPin = BudapestGoPlatformPin(
+        colors: platformColors,
+        angle: angle,
+        diameter: diameter,
+        strokeWidth: strokeWidth,
+        strokeColor: const Color(0xFF212121),
+        showArrow: true,
+        arrowSize: arrowSize,
+        isLod3: isLod3,
+        isDarkMode: isDarkMode,
+      );
+
+      markers.add(
+        Marker(
+          point: LatLng(s.lat, s.lon),
+          width: markerBoxSize,
+          height: markerBoxSize,
+          alignment: Alignment.center,
+          child: widget.onStationTapped != null
+              ? GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: () {
+                    final platformNode = s.isMultimodalHub
+                        ? StopNode(
+                            id: s.id,
+                            hubId: s.hubId,
+                            name: s.name,
+                            lat: s.lat,
+                            lon: s.lon,
+                            operator: s.operator,
+                            platformCode: s.platformCode,
+                            isMultimodalHub: false,
+                            vehicleType: s.vehicleType,
+                            servedRoutes: s.servedRoutes,
+                            direction: s.direction,
+                          )
+                        : s;
+                    widget.onStationTapped!(platformNode);
+                  },
+                  child: platformPin,
+                )
+              : platformPin,
+        ),
+      );
+    }
+    return markers;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final showPlatforms = ref.watch(showPlatformsProvider);
+    final zoomTier = ref.watch(mapZoomProvider.select((z) => z < 16.8 ? 0 : (z >= 17.5 ? 2 : 1)));
+    if (!showPlatforms || zoomTier == 0) return const SizedBox.shrink();
+
+    final isLod3 = zoomTier == 2;
+    final isDarkMode = ref.watch(mapDarkModeProvider);
+    final enabledModes = ref.watch(enabledTransitModesProvider);
+    final platforms = ref.watch(viewportPlatformsProvider).valueOrNull ?? const <StopNode>[];
+
+    if (!identical(platforms, _lastPlatforms) ||
+        !identical(enabledModes, _lastEnabledModes) ||
+        _lastIsLod3 != isLod3 ||
+        _lastDark != isDarkMode) {
+      _cachedMarkers = _buildMarkers(platforms, enabledModes, isLod3, isDarkMode);
+      _lastPlatforms = platforms;
+      _lastEnabledModes = enabledModes;
+      _lastIsLod3 = isLod3;
+      _lastDark = isDarkMode;
+    }
+
+    if (_cachedMarkers.isEmpty) return const SizedBox.shrink();
+    return MarkerLayer(markers: _cachedMarkers);
+  }
+}
+
 class _StationLabelCandidate {
   final String name;
   final LatLng centroid;
@@ -1068,10 +1123,9 @@ class BudapestGoPlatformPin extends StatelessWidget {
   final bool isLod3;
   final bool isDarkMode;
 
-  BudapestGoPlatformPin({
+  const BudapestGoPlatformPin({
     super.key,
-    Color? color,
-    List<Color>? colors,
+    this.colors = const [Color(0xFF009EE3)],
     this.angle = 0,
     required this.diameter,
     this.strokeWidth = 1.0,
@@ -1080,7 +1134,7 @@ class BudapestGoPlatformPin extends StatelessWidget {
     this.arrowSize = 5.0,
     this.isLod3 = false,
     this.isDarkMode = false,
-  }) : colors = colors ?? (color != null ? [color] : [const Color(0xFF009EE3)]);
+  });
 
   @override
   Widget build(BuildContext context) {

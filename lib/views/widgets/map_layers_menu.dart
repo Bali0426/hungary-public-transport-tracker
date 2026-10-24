@@ -353,7 +353,7 @@ class _MapLayersFloatingMenuState extends ConsumerState<MapLayersFloatingMenu> {
                                 color: showPlatforms ? theme.colorScheme.primary : theme.colorScheme.onSurfaceVariant,
                               ),
                               title: const Text('Peronok / Irányok', style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w600)),
-                              subtitle: const Text('Külön vágányok és táblák', style: TextStyle(fontSize: 9.5)),
+                              subtitle: const Text('Külön vágányok és táblák (zoom >= 16.8)', style: TextStyle(fontSize: 9.5)),
                               onChanged: (next) {
                                 ref.read(showPlatformsProvider.notifier).state = next;
                                 if (next) widget.onStopsEnabled?.call();

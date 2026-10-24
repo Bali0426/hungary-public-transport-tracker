@@ -1,5 +1,5 @@
 name: hungary_public_transport_tracker
-description: Multimodal Transit App (MÁV + BKK) powered by Flutter, MapLibre GL, and Rust FFI.
+description: Multimodal Transit App (MÁV + BKK) powered by Flutter and Rust FFI.
 publish_to: "none"
 version: 0.1.0+1
 

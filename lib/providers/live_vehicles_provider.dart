@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../bridge/bridge_generated.dart';
+import '../utils/stop_group_geometry.dart';
 
 /// Represents the current map camera bounding box (defaulting to central Budapest).
 class ViewportBbox {
@@ -104,21 +105,25 @@ final liveVehiclesGeoJsonProvider = StreamProvider<String>((ref) {
   return controller.stream;
 });
 
-List<StopNode> _lastStopGroupsCache = const [];
+/// Current map zoom level (debounced / tiered for LOD decisions).
+final mapZoomProvider = StateProvider<double>((ref) => 12.5);
 
-/// Queries R-Tree indexed static stop groups inside the current map viewport (debounced on camera idle).
-final viewportStopGroupsProvider = FutureProvider<List<StopNode>>((ref) async {
+List<PrebakedStopGroup> _lastStopGroupsCache = const [];
+
+/// Returns pre-baked static stop groups (with fixed centroids and buffered polygons) inside the current map viewport.
+final viewportStopGroupsProvider = FutureProvider<List<PrebakedStopGroup>>((ref) async {
   final showGroups = ref.watch(showStopGroupsProvider);
-  if (!showGroups) return const <StopNode>[];
+  final zoomOk = ref.watch(mapZoomProvider.select((z) => z >= 15.0));
+  if (!showGroups || !zoomOk) return const <PrebakedStopGroup>[];
 
   final bbox = ref.watch(viewportBboxProvider);
   try {
-    final groups = await TransitRustBridge.instance.getStopGroupsInBbox(
+    final groups = await StopGroupGeometry.queryInBbox(
       minLat: bbox.minLat,
       minLon: bbox.minLon,
       maxLat: bbox.maxLat,
       maxLon: bbox.maxLon,
-      limit: 250,
+      limit: 90,
     );
     _lastStopGroupsCache = groups;
     return groups;
@@ -131,9 +136,9 @@ List<StopNode> _lastPlatformsCache = const [];
 
 /// Queries R-Tree indexed individual platforms/directions inside the current map viewport (debounced on camera idle).
 final viewportPlatformsProvider = FutureProvider<List<StopNode>>((ref) async {
-  final showGroups = ref.watch(showStopGroupsProvider);
   final showPlatforms = ref.watch(showPlatformsProvider);
-  if (!showGroups && !showPlatforms) return const <StopNode>[];
+  final zoomOk = ref.watch(mapZoomProvider.select((z) => z >= 16.8));
+  if (!showPlatforms || !zoomOk) return const <StopNode>[];
 
   final bbox = ref.watch(viewportBboxProvider);
   try {
@@ -142,7 +147,7 @@ final viewportPlatformsProvider = FutureProvider<List<StopNode>>((ref) async {
       minLon: bbox.minLon,
       maxLat: bbox.maxLat,
       maxLon: bbox.maxLon,
-      limit: 600,
+      limit: 100,
     );
     _lastPlatformsCache = platforms;
     return platforms;

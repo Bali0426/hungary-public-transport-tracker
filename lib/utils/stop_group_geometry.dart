@@ -1,28 +1,105 @@
+import 'dart:convert';
+import 'dart:io';
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
 
 import '../bridge/bridge_generated.dart';
 
-/// Represents a clustered station hub with its platforms and centroid.
-class HubClusterInfo {
+/// Pre-baked stop group / station hub with fixed centroid and buffered convex hull polygon.
+class PrebakedStopGroup {
+  final String hubId;
   final String name;
   final LatLng centroid;
-  final List<StopNode> stops;
+  final Operator operator;
   final bool isMultimodal;
+  final int stopCount;
+  final double minLat;
+  final double maxLat;
+  final double minLon;
+  final double maxLon;
+  final List<LatLng> polygonPoints;
+  final StopNode groupNode;
 
-  const HubClusterInfo({
+  const PrebakedStopGroup({
+    required this.hubId,
     required this.name,
     required this.centroid,
-    required this.stops,
+    required this.operator,
     required this.isMultimodal,
+    required this.stopCount,
+    required this.minLat,
+    required this.maxLat,
+    required this.minLon,
+    required this.maxLon,
+    required this.polygonPoints,
+    required this.groupNode,
   });
+
+  factory PrebakedStopGroup.fromJson(Map<String, dynamic> json) {
+    final id = json['id'] as String;
+    final name = json['name'] as String;
+    final lat = (json['lat'] as num).toDouble();
+    final lon = (json['lon'] as num).toDouble();
+    final opStr = (json['op'] as String? ?? 'BKK').toUpperCase();
+    final op = opStr == 'MAV' ? Operator.mav : Operator.bkk;
+    final isMm = (json['mm'] as num? ?? 0) != 0;
+    final count = (json['count'] as num? ?? 1).toInt();
+    final minLat = (json['minLat'] as num).toDouble();
+    final maxLat = (json['maxLat'] as num).toDouble();
+    final minLon = (json['minLon'] as num).toDouble();
+    final maxLon = (json['maxLon'] as num).toDouble();
+
+    final rawPoly = json['poly'] as List<dynamic>? ?? const [];
+    final polyPts = rawPoly.isEmpty
+        ? const <LatLng>[]
+        : List<LatLng>.unmodifiable(
+            rawPoly.map((pt) {
+              final pair = pt as List<dynamic>;
+              return LatLng((pair[0] as num).toDouble(), (pair[1] as num).toDouble());
+            }),
+          );
+
+    return PrebakedStopGroup(
+      hubId: id,
+      name: name,
+      centroid: LatLng(lat, lon),
+      operator: op,
+      isMultimodal: isMm,
+      stopCount: count,
+      minLat: minLat,
+      maxLat: maxLat,
+      minLon: minLon,
+      maxLon: maxLon,
+      polygonPoints: polyPts,
+      groupNode: StopNode(
+        id: 'GROUP:$name:$lat:$lon',
+        hubId: id,
+        name: name,
+        lat: lat,
+        lon: lon,
+        operator: op,
+        platformCode: null,
+        isMultimodalHub: true,
+        vehicleType: 'hub',
+        servedRoutes: null,
+        direction: null,
+      ),
+    );
+  }
 }
 
-/// Calculates convex hulls with ~20m rounded buffer zones for BudapestGO-style station hulls.
+/// Manages pre-baked station hub geometries and R-Tree / BBox spatial lookups.
 class StopGroupGeometry {
-  static const double _bufferMeters = 20.0;
+  static final Map<String, String> _cleanNameCache = {};
+  static final RegExp _reMPlusH = RegExp(r'\s+M\+H\b', caseSensitive: false);
+  static final RegExp _reM = RegExp(r'\s+M\b');
+  static final RegExp _reH = RegExp(r'\s+H\b');
+
+  static List<PrebakedStopGroup>? _prebakedGroups;
+  static Future<List<PrebakedStopGroup>>? _loadingFuture;
 
   /// Fast metric distance approximation around Budapest (~47.5° lat).
   static double distanceMeters(double lat1, double lon1, double lat2, double lon2) {
@@ -34,108 +111,92 @@ class StopGroupGeometry {
   /// Strips transport suffixes, platform brackets, and parentheticals
   /// e.g. "Széll Kálmán tér M (Csaba utca)" -> "Széll Kálmán tér".
   static String cleanStationName(String name) {
-    var s = name.trim();
-    if (s.endsWith(')')) {
-      final idx = s.lastIndexOf('(');
-      if (idx != -1) s = s.substring(0, idx).trim();
-    }
-    if (s.endsWith(']')) {
-      final idx = s.lastIndexOf('[');
-      if (idx != -1) s = s.substring(0, idx).trim();
-    }
-    s = s.replaceAll(RegExp(r'\s+M\+H\b', caseSensitive: false), '');
-    s = s.replaceAll(RegExp(r'\s+M\b'), '');
-    s = s.replaceAll(RegExp(r'\s+H\b'), '');
-    return s.trim();
+    return _cleanNameCache.putIfAbsent(name, () {
+      var s = name.trim();
+      if (s.endsWith(')')) {
+        final idx = s.lastIndexOf('(');
+        if (idx != -1) s = s.substring(0, idx).trim();
+      }
+      if (s.endsWith(']')) {
+        final idx = s.lastIndexOf('[');
+        if (idx != -1) s = s.substring(0, idx).trim();
+      }
+      s = s.replaceAll(_reMPlusH, '');
+      s = s.replaceAll(_reM, '');
+      s = s.replaceAll(_reH, '');
+      return s.trim();
+    });
   }
 
-  /// Clusters platforms by clean name / hub ID within 150-250m (~220m).
-  /// Different named adjacent hubs (e.g. Boráros tér vs Mester utca) remain separate.
-  static List<HubClusterInfo> getHubClusters(List<StopNode> platforms) {
-    if (platforms.isEmpty) return const [];
+  /// Loads pre-baked stop groups once from `assets/db/stop_groups_prebaked.json`.
+  static Future<List<PrebakedStopGroup>> ensureLoaded() {
+    if (_prebakedGroups != null) return Future.value(_prebakedGroups!);
+    return _loadingFuture ??= _loadInternal();
+  }
 
-    final List<List<StopNode>> clusters = [];
-
-    for (final p in platforms) {
-      final pName = cleanStationName(p.name).toLowerCase();
-      bool added = false;
-      for (final cluster in clusters) {
-        final first = cluster.first;
-        final clusterName = cleanStationName(first.name).toLowerCase();
-        final sameIdentity = (p.hubId != null && p.hubId!.isNotEmpty && p.hubId == first.hubId) ||
-            (pName == clusterName);
-        if (sameIdentity) {
-          final isClose = cluster.any((s) => distanceMeters(s.lat, s.lon, p.lat, p.lon) <= 220.0);
-          if (isClose) {
-            cluster.add(p);
-            added = true;
-            break;
-          }
-        }
+  static Future<List<PrebakedStopGroup>> _loadInternal() async {
+    try {
+      String raw;
+      final localFile = File('assets/db/stop_groups_prebaked.json');
+      if (localFile.existsSync()) {
+        raw = await localFile.readAsString();
+      } else {
+        raw = await rootBundle.loadString('assets/db/stop_groups_prebaked.json');
       }
-      if (!added) {
-        clusters.add([p]);
-      }
-    }
-
-    // Merge clusters that share identity and are within 220m
-    bool mergedAny = true;
-    while (mergedAny) {
-      mergedAny = false;
-      for (int i = 0; i < clusters.length; i++) {
-        for (int j = i + 1; j < clusters.length; j++) {
-          final c1 = clusters[i];
-          final c2 = clusters[j];
-          final name1 = cleanStationName(c1.first.name).toLowerCase();
-          final name2 = cleanStationName(c2.first.name).toLowerCase();
-          final sameIdentity = (c1.first.hubId != null && c1.first.hubId!.isNotEmpty && c1.first.hubId == c2.first.hubId) ||
-              (name1 == name2);
-          if (sameIdentity) {
-            final isClose = c1.any((s1) => c2.any((s2) => distanceMeters(s1.lat, s1.lon, s2.lat, s2.lon) <= 220.0));
-            if (isClose) {
-              c1.addAll(c2);
-              clusters.removeAt(j);
-              mergedAny = true;
-              break;
-            }
-          }
-        }
-        if (mergedAny) break;
-      }
-    }
-
-    return clusters.map((group) {
-      double sumLat = 0;
-      double sumLon = 0;
-      bool isMm = false;
-      for (final s in group) {
-        sumLat += s.lat;
-        sumLon += s.lon;
-        if (s.isMultimodalHub) isMm = true;
-      }
-      final centroid = LatLng(sumLat / group.length, sumLon / group.length);
-      return HubClusterInfo(
-        name: cleanStationName(group.first.name),
-        centroid: centroid,
-        stops: group,
-        isMultimodal: isMm,
+      final decoded = jsonDecode(raw) as List<dynamic>;
+      final list = List<PrebakedStopGroup>.unmodifiable(
+        decoded.map((e) => PrebakedStopGroup.fromJson(e as Map<String, dynamic>)),
       );
-    }).toList();
+      _prebakedGroups = list;
+      return list;
+    } catch (_) {
+      _prebakedGroups = const [];
+      return const [];
+    }
   }
 
-  static final Map<String, List<LatLng>> _prebakedHullCache = {};
+  /// Queries pre-baked stop groups intersecting the viewport bounding box, ordered from center.
+  static Future<List<PrebakedStopGroup>> queryInBbox({
+    required double minLat,
+    required double minLon,
+    required double maxLat,
+    required double maxLon,
+    int limit = 90,
+  }) async {
+    final all = await ensureLoaded();
+    if (all.isEmpty) return const [];
 
-  /// Builds buffered hull polygons styled according to BudapestGO LOD specs.
-  static List<Polygon> buildHubPolygons(
-    List<StopNode> platforms, {
+    final centerLat = (minLat + maxLat) * 0.5;
+    final centerLon = (minLon + maxLon) * 0.5;
+
+    final matches = <PrebakedStopGroup>[];
+    for (final g in all) {
+      if (g.maxLat >= minLat && g.minLat <= maxLat && g.maxLon >= minLon && g.minLon <= maxLon) {
+        matches.add(g);
+      }
+    }
+
+    matches.sort((a, b) {
+      final dA = (a.centroid.latitude - centerLat) * (a.centroid.latitude - centerLat) +
+          (a.centroid.longitude - centerLon) * (a.centroid.longitude - centerLon);
+      final dB = (b.centroid.latitude - centerLat) * (b.centroid.latitude - centerLat) +
+          (b.centroid.longitude - centerLon) * (b.centroid.longitude - centerLon);
+      return dA.compareTo(dB);
+    });
+
+    if (matches.length > limit) {
+      return List<PrebakedStopGroup>.unmodifiable(matches.take(limit));
+    }
+    return List<PrebakedStopGroup>.unmodifiable(matches);
+  }
+
+  /// Builds FlutterMap `Polygon` widgets directly from pre-baked hull coordinates (O(1) per group).
+  static List<Polygon> buildPrebakedPolygons(
+    List<PrebakedStopGroup> groups, {
     required bool isDarkMode,
-    double zoom = 15.0,
   }) {
-    if (platforms.isEmpty || zoom < 15.0) return const [];
+    if (groups.isEmpty) return const [];
 
-    final clusters = getHubClusters(platforms);
-
-    // Stop group polygon fills: grayish in light mode, brownish in dark mode
     final fillColor = isDarkMode
         ? const Color.fromRGBO(145, 95, 45, 0.28)
         : const Color.fromRGBO(120, 120, 120, 0.22);
@@ -145,20 +206,11 @@ class StopGroupGeometry {
     const strokeWidth = 1.2;
 
     final polygons = <Polygon>[];
-
-    for (final cluster in clusters) {
-      if (cluster.stops.length < 2) continue; // Multi-platform hubs receive boundary hull
-
-      final clusterKey = '${cluster.name}_${cluster.stops.length}_${cluster.stops.first.id}';
-      final points = _prebakedHullCache.putIfAbsent(
-        clusterKey,
-        () => _createBufferedConvexHull(cluster.stops, _bufferMeters),
-      );
-
-      if (points.length >= 3) {
+    for (final g in groups) {
+      if (g.polygonPoints.length >= 3) {
         polygons.add(
           Polygon(
-            points: points,
+            points: g.polygonPoints,
             color: fillColor,
             borderColor: strokeColor,
             borderStrokeWidth: strokeWidth,
@@ -169,156 +221,5 @@ class StopGroupGeometry {
       }
     }
     return polygons;
-  }
-
-  static List<LatLng> _createBufferedConvexHull(List<StopNode> stops, double bufferM) {
-    if (stops.isEmpty) return const [];
-
-    // Filter duplicate or near-identical coordinates
-    final uniqueStops = <StopNode>[];
-    for (final s in stops) {
-      if (!uniqueStops.any((u) => (u.lat - s.lat).abs() < 1e-5 && (u.lon - s.lon).abs() < 1e-5)) {
-        uniqueStops.add(s);
-      }
-    }
-    if (uniqueStops.length < 2) return const [];
-
-    double sumLat = 0;
-    double sumLon = 0;
-    for (final s in uniqueStops) {
-      sumLat += s.lat;
-      sumLon += s.lon;
-    }
-    final centerLat = sumLat / uniqueStops.length;
-    final centerLon = sumLon / uniqueStops.length;
-    final latRad = centerLat * math.pi / 180.0;
-    final metersPerDegLat = 111132.954 - 559.822 * math.cos(2 * latRad);
-    final metersPerDegLon = 111412.84 * math.cos(latRad);
-
-    final pts = uniqueStops.map((s) {
-      final x = (s.lon - centerLon) * metersPerDegLon;
-      final y = (s.lat - centerLat) * metersPerDegLat;
-      return math.Point<double>(x, y);
-    }).toList();
-
-    List<math.Point<double>> hull;
-    if (pts.length == 2) {
-      hull = [pts[0], pts[1]];
-    } else {
-      hull = _convexHull2D(pts);
-    }
-
-    if (hull.length < 2) return const [];
-
-    final bufferedPts = <math.Point<double>>[];
-    final n = hull.length;
-
-    if (n == 2) {
-      // 2 points: Rounded stadium capsule
-      final p1 = hull[0];
-      final p2 = hull[1];
-      final dx = p2.x - p1.x;
-      final dy = p2.y - p1.y;
-      final dist = math.sqrt(dx * dx + dy * dy);
-      if (dist < 1e-4) return const [];
-      final angleBase = math.atan2(dy, dx);
-
-      for (int i = 0; i <= 8; i++) {
-        final a = angleBase - math.pi / 2 + (i / 8) * math.pi;
-        bufferedPts.add(math.Point<double>(
-          p2.x + bufferM * math.cos(a),
-          p2.y + bufferM * math.sin(a),
-        ));
-      }
-      for (int i = 0; i <= 8; i++) {
-        final a = angleBase + math.pi / 2 + (i / 8) * math.pi;
-        bufferedPts.add(math.Point<double>(
-          p1.x + bufferM * math.cos(a),
-          p1.y + bufferM * math.sin(a),
-        ));
-      }
-    } else {
-      // n >= 3: Buffered polygon with rounded corner arcs
-      for (int i = 0; i < n; i++) {
-        final prev = hull[(i - 1 + n) % n];
-        final curr = hull[i];
-        final next = hull[(i + 1) % n];
-
-        final d1x = curr.x - prev.x;
-        final d1y = curr.y - prev.y;
-        final len1 = math.sqrt(d1x * d1x + d1y * d1y);
-        final n1x = (len1 > 1e-4) ? d1y / len1 : 0.0;
-        final n1y = (len1 > 1e-4) ? -d1x / len1 : 0.0;
-
-        final d2x = next.x - curr.x;
-        final d2y = next.y - curr.y;
-        final len2 = math.sqrt(d2x * d2x + d2y * d2y);
-        final n2x = (len2 > 1e-4) ? d2y / len2 : 0.0;
-        final n2y = (len2 > 1e-4) ? -d2x / len2 : 0.0;
-
-        var a1 = math.atan2(n1y, n1x);
-        var a2 = math.atan2(n2y, n2x);
-        while (a2 < a1) {
-          a2 += 2 * math.pi;
-        }
-
-        const steps = 3;
-        for (int s = 0; s <= steps; s++) {
-          final t = s / steps;
-          final a = a1 + t * (a2 - a1);
-          bufferedPts.add(math.Point<double>(
-            curr.x + bufferM * math.cos(a),
-            curr.y + bufferM * math.sin(a),
-          ));
-        }
-      }
-    }
-
-    return bufferedPts.map((p) {
-      final lat = centerLat + (p.y / metersPerDegLat);
-      final lon = centerLon + (p.x / metersPerDegLon);
-      return LatLng(lat, lon);
-    }).toList();
-  }
-
-  static List<math.Point<double>> _convexHull2D(List<math.Point<double>> points) {
-    final pts = List<math.Point<double>>.from(points);
-    pts.sort((a, b) {
-      if (a.x != b.x) return a.x.compareTo(b.x);
-      return a.y.compareTo(b.y);
-    });
-
-    final unique = <math.Point<double>>[];
-    for (final p in pts) {
-      if (unique.isEmpty || (unique.last.x - p.x).abs() > 1e-6 || (unique.last.y - p.y).abs() > 1e-6) {
-        unique.add(p);
-      }
-    }
-    if (unique.length <= 2) return unique;
-
-    double cross(math.Point<double> o, math.Point<double> a, math.Point<double> b) {
-      return (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
-    }
-
-    final lower = <math.Point<double>>[];
-    for (final p in unique) {
-      while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) {
-        lower.removeLast();
-      }
-      lower.add(p);
-    }
-
-    final upper = <math.Point<double>>[];
-    for (int i = unique.length - 1; i >= 0; i--) {
-      final p = unique[i];
-      while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) {
-        upper.removeLast();
-      }
-      upper.add(p);
-    }
-
-    lower.removeLast();
-    upper.removeLast();
-    return [...lower, ...upper];
   }
 }
